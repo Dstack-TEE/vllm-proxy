@@ -148,6 +148,7 @@ async def stream_vllm_response(
         generate_stream(response),
         background=BackgroundTasks([response.aclose, client.aclose]),
         media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
     )
 
 
@@ -271,6 +272,7 @@ async def chat_completions(
         "stream", False
     )  # Default to non-streaming if not specified
     requested_model = modified_json.get("model")
+    print("requested_model: ", requested_model)
 
     modified_request_body = json.dumps(modified_json).encode("utf-8")
     if is_stream:
