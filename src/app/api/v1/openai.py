@@ -65,6 +65,7 @@ async def stream_vllm_response(
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
+    requested_model: Optional[str] = None,
 ):
     """
     Handle streaming vllm request
@@ -74,6 +75,7 @@ async def stream_vllm_response(
         request_hash: Optional hash from request header (X-Request-Hash). Used by trusted clients to provide
                      pre-calculated request hash, avoiding redundant hash computation. Falls back to
                      calculating hash from request_body if not provided
+        requested_model: The model name requested by the client
     Returns:
         A streaming response
     """
@@ -89,22 +91,31 @@ async def stream_vllm_response(
 
     async def generate_stream(response):
         nonlocal chat_id, h
-        async for chunk in response.aiter_text():
-            h.update(chunk.encode())
-            # Extract the cache key (data.id) from the first chunk
-            if not chat_id:
-                data = chunk.strip("data: ").strip()
-                if not data or data == "[DONE]":
-                    continue
-                try:
-                    chunk_data = json.loads(data)
-                    chat_id = chunk_data.get("id")
-                except Exception as e:
-                    error_message = f"Failed to parse the first chunk: {e}\n The original data is: {data}"
-                    log.error(error_message)
-                    raise Exception(error_message)
+        async for line in response.aiter_lines():
+            final_chunk = line + "\n"
 
-            yield chunk
+            if line.startswith("data: "):
+                data = line[6:].strip()
+                if data and data != "[DONE]":
+                    try:
+                        chunk_data = json.loads(data)
+                        
+                        # Extract the cache key (data.id) from the first chunk
+                        if not chat_id:
+                            chat_id = chunk_data.get("id")
+                        
+                        # Override the model name if requested_model is provided
+                        if requested_model and "model" in chunk_data:
+                            chunk_data["model"] = requested_model
+                            final_chunk = f"data: {json.dumps(chunk_data)}\n"
+                            
+                    except Exception as e:
+                        error_message = f"Failed to parse chunk: {e}\n The original data is: {data}"
+                        log.error(error_message)
+                        if not chat_id:
+                             raise Exception(error_message)
+            h.update(final_chunk.encode())
+            yield final_chunk
 
         response_sha256 = h.hexdigest()
         # Cache the full request and response using the extracted cache key
@@ -146,6 +157,7 @@ async def non_stream_vllm_response(
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
+    requested_model: Optional[str] = None,
 ):
     """
     Handle non-streaming responses
@@ -155,6 +167,7 @@ async def non_stream_vllm_response(
         request_hash: Optional hash from request header (X-Request-Hash). Used by trusted clients to provide
                      pre-calculated request hash, avoiding redundant hash computation. Falls back to
                      calculating hash from request_body if not provided
+        requested_model: The model name requested by the client
     Returns:
         The response data
     """
@@ -173,10 +186,15 @@ async def non_stream_vllm_response(
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
         response_data = response.json()
+        
+        # Override the model name if requested_model is provided
+        if requested_model and "model" in response_data:
+            response_data["model"] = requested_model
+            
         # Cache the request-response pair using the chat ID
         chat_id = response_data.get("id")
         if chat_id:
-            response_sha256 = sha256(response.content).hexdigest()
+            response_sha256 = sha256(json.dumps(response_data)).hexdigest()
             cache.set_chat(
                 chat_id, json.dumps(sign_chat(f"{request_sha256}:{response_sha256}"))
             )
@@ -252,17 +270,18 @@ async def chat_completions(
     is_stream = modified_json.get(
         "stream", False
     )  # Default to non-streaming if not specified
+    requested_model = modified_json.get("model")
 
     modified_request_body = json.dumps(modified_json).encode("utf-8")
     if is_stream:
         # Create a streaming response
         return await stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash
+            VLLM_URL, request_body, modified_request_body, x_request_hash, requested_model
         )
     else:
         # Handle non-streaming response
         response_data = await non_stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash
+            VLLM_URL, request_body, modified_request_body, x_request_hash, requested_model
         )
         return JSONResponse(content=response_data)
 
@@ -282,17 +301,18 @@ async def completions(
     is_stream = modified_json.get(
         "stream", False
     )  # Default to non-streaming if not specified
+    requested_model = modified_json.get("model")
 
     modified_request_body = json.dumps(modified_json).encode("utf-8")
     if is_stream:
         # Create a streaming response
         return await stream_vllm_response(
-            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash
+            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash, requested_model
         )
     else:
         # Handle non-streaming response
         response_data = await non_stream_vllm_response(
-            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash
+            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash, requested_model
         )
         return JSONResponse(content=response_data)
 
