@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: vllm-proxy
+        working-directory: .
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,8 +50,8 @@ jobs:
         id: build-and-push
         uses: docker/build-push-action@v5
         with:
-          context: vllm-proxy
-          file: vllm-proxy/docker/Dockerfile
+          context: .
+          file: docker/Dockerfile
           push: true
           tags: ${{ vars.DOCKERHUB_ORG }}/vllm-proxy:${{ github.ref_name }}
           platforms: linux/amd64
