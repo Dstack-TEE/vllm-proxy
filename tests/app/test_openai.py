@@ -1,8 +1,8 @@
 from unittest.mock import patch, AsyncMock
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 import json
+import pytest_asyncio
 
 # Import and setup test environment before importing app
 from tests.app.test_helpers import setup_test_environment, TEST_AUTH_HEADER
@@ -20,7 +20,12 @@ from app.main import app
 from app.api.v1.openai import VLLM_URL, VLLM_BASE_URL
 from tests.app.mock_quote import ED25519, ECDSA, ecdsa_quote, ed25519_quote
 
-client = TestClient(app)
+
+@pytest_asyncio.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+        yield async_client
 
 
 async def yield_sse_response(data_list):
@@ -30,7 +35,7 @@ async def yield_sse_response(data_list):
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_stream_chat_completions_success(respx_mock):
+async def test_stream_chat_completions_success(respx_mock, client):
     # Test request data
     request_data = {
         "model": "test-model",
@@ -78,7 +83,7 @@ async def test_stream_chat_completions_success(respx_mock):
     )
 
     # Make request
-    response = client.post(
+    response = await client.post(
         "/v1/chat/completions",
         json=request_data,
         headers={"Authorization": TEST_AUTH_HEADER},
@@ -106,7 +111,7 @@ async def test_stream_chat_completions_success(respx_mock):
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_stream_chat_completions_upstream_error(respx_mock):
+async def test_stream_chat_completions_upstream_error(respx_mock, client):
     # Test request data
     request_data = {
         "model": "test-model",
@@ -127,7 +132,7 @@ async def test_stream_chat_completions_upstream_error(respx_mock):
     )
 
     # Make request
-    response = client.post(
+    response = await client.post(
         "/v1/chat/completions",
         json=request_data,
         headers={"Authorization": TEST_AUTH_HEADER},
@@ -145,7 +150,7 @@ async def test_stream_chat_completions_upstream_error(respx_mock):
 
 
 @pytest.mark.asyncio
-async def test_signature_default_algo():
+async def test_signature_default_algo(client):
     # Setup test data
     chat_id = "test-chat-123"
     test_data = "test request:response data"
@@ -167,7 +172,7 @@ async def test_signature_default_algo():
         mock_cache.get_chat.return_value = cache_data
 
         # Make request
-        response = client.get(
+        response = await client.get(
             f"/v1/signature/{chat_id}", headers={"Authorization": TEST_AUTH_HEADER}
         )
 
@@ -180,7 +185,7 @@ async def test_signature_default_algo():
 
 
 @pytest.mark.asyncio
-async def test_signature_explicit_algo():
+async def test_signature_explicit_algo(client):
     # Setup test data
     chat_id = "test-chat-123"
     test_data = "test request:response data"
@@ -203,7 +208,7 @@ async def test_signature_explicit_algo():
 
         # Make request with explicit algorithm
         explicit_algo = ED25519  # Use ED25519 explicitly
-        response = client.get(
+        response = await client.get(
             f"/v1/signature/{chat_id}?signing_algo={explicit_algo}",
             headers={"Authorization": TEST_AUTH_HEADER},
         )
@@ -217,7 +222,7 @@ async def test_signature_explicit_algo():
 
 
 @pytest.mark.asyncio
-async def test_signature_invalid_algo():
+async def test_signature_invalid_algo(client):
     chat_id = "test-chat-123"
 
     # Create properly formatted cache data
@@ -236,7 +241,7 @@ async def test_signature_invalid_algo():
         mock_cache.get_chat.return_value = cache_data
 
         # Make request with invalid algorithm
-        response = client.get(
+        response = await client.get(
             f"/v1/signature/{chat_id}?signing_algo=invalid-algo",
             headers={"Authorization": TEST_AUTH_HEADER},
         )
@@ -249,7 +254,7 @@ async def test_signature_invalid_algo():
 
 
 @pytest.mark.asyncio
-async def test_signature_chat_not_found():
+async def test_signature_chat_not_found(client):
     chat_id = "nonexistent-chat"
 
     # Mock the cache to return None for chat not found
@@ -257,7 +262,7 @@ async def test_signature_chat_not_found():
         mock_cache.get_chat.return_value = None
 
         # Make request
-        response = client.get(
+        response = await client.get(
             f"/v1/signature/{chat_id}", headers={"Authorization": TEST_AUTH_HEADER}
         )
 
@@ -270,7 +275,7 @@ async def test_signature_chat_not_found():
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_chat_completions_with_request_hash_streaming(respx_mock):
+async def test_chat_completions_with_request_hash_streaming(respx_mock, client):
     # Test request data
     request_data = {
         "model": "test-model",
@@ -327,7 +332,7 @@ async def test_chat_completions_with_request_hash_streaming(respx_mock):
     ) as mock_log:
 
         # Make request with X-Request-Hash header
-        response = client.post(
+        response = await client.post(
             "/v1/chat/completions",
             json=request_data,
             headers={
@@ -351,7 +356,7 @@ async def test_chat_completions_with_request_hash_streaming(respx_mock):
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_chat_completions_with_request_hash_non_streaming(respx_mock):
+async def test_chat_completions_with_request_hash_non_streaming(respx_mock, client):
     # Test request data
     request_data = {
         "model": "test-model",
@@ -389,7 +394,7 @@ async def test_chat_completions_with_request_hash_non_streaming(respx_mock):
     ) as mock_log:
 
         # Make request with X-Request-Hash header
-        response = client.post(
+        response = await client.post(
             "/v1/chat/completions",
             json=request_data,
             headers={
@@ -413,7 +418,7 @@ async def test_chat_completions_with_request_hash_non_streaming(respx_mock):
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_completions_with_request_hash_streaming(respx_mock):
+async def test_completions_with_request_hash_streaming(respx_mock, client):
     # Test request data
     request_data = {"model": "test-model", "prompt": "Hello", "stream": True}
 
@@ -461,7 +466,7 @@ async def test_completions_with_request_hash_streaming(respx_mock):
     ) as mock_log:
 
         # Make request with X-Request-Hash header
-        response = client.post(
+        response = await client.post(
             "/v1/completions",
             json=request_data,
             headers={
@@ -485,7 +490,7 @@ async def test_completions_with_request_hash_streaming(respx_mock):
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_completions_with_request_hash_non_streaming(respx_mock):
+async def test_completions_with_request_hash_non_streaming(respx_mock, client):
     # Test request data
     request_data = {"model": "test-model", "prompt": "Hello", "stream": False}
 
@@ -513,7 +518,7 @@ async def test_completions_with_request_hash_non_streaming(respx_mock):
     ) as mock_log:
 
         # Make request with X-Request-Hash header
-        response = client.post(
+        response = await client.post(
             "/v1/completions",
             json=request_data,
             headers={
@@ -537,7 +542,7 @@ async def test_completions_with_request_hash_non_streaming(respx_mock):
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_chat_completions_without_request_hash(respx_mock):
+async def test_chat_completions_without_request_hash(respx_mock, client):
     # Test request data without X-Request-Hash header
     request_data = {
         "model": "test-model",
@@ -572,7 +577,7 @@ async def test_chat_completions_without_request_hash(respx_mock):
     ) as mock_log:
 
         # Make request without X-Request-Hash header
-        response = client.post(
+        response = await client.post(
             "/v1/chat/completions",
             json=request_data,
             headers={"Authorization": TEST_AUTH_HEADER},
