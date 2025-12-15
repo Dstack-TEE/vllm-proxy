@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 # Set required environment variables before any imports
 os.environ["MODEL_NAME"] = "test-model"
-os.environ["VLLM_BASE_URL"] = "http://localhost:8001" 
+os.environ["VLLM_BASE_URL"] = "http://localhost:8001"
 os.environ["CHAT_CACHE_EXPIRATION"] = "1200"
 os.environ["REDIS_HOST"] = "localhost"
 os.environ["REDIS_PORT"] = "6379"
