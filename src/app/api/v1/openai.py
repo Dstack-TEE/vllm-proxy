@@ -39,6 +39,22 @@ VLLM_MODELS_URL = f"{VLLM_BASE_URL}/v1/models"
 TIMEOUT = 60 * 10
 
 COMMON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
+SSE_RESPONSE_HEADERS = {
+    # Disable response buffering in Nginx (required for SSE to flush properly).
+    "X-Accel-Buffering": "no",
+    # Prevent intermediate caches from buffering the event stream.
+    "Cache-Control": "no-cache",
+}
+
+
+def _strip_proxy_headers(upstream_headers: httpx.Headers) -> dict[str, str]:
+    stripped: dict[str, str] = {}
+    for key, value in upstream_headers.items():
+        lower_key = key.lower()
+        if lower_key in {"connection", "transfer-encoding", "content-length"}:
+            continue
+        stripped[key] = value
+    return stripped
 
 
 def sign_request(request: dict, response: str):
@@ -141,13 +157,15 @@ async def stream_vllm_response(
         return Response(
             content=error_content,
             status_code=response.status_code,
-            headers=response.headers,
+            headers=_strip_proxy_headers(response.headers),
         )
 
+    headers = dict(SSE_RESPONSE_HEADERS)
     return StreamingResponse(
         generate_stream(response),
         background=BackgroundTasks([response.aclose, client.aclose]),
         media_type="text/event-stream",
+        headers=headers,
     )
 
 

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          UV_NO_MANAGED_PYTHON=1 UV_PYTHON_DOWNLOADS=never uv venv -p python
+          uv pip install --python .venv/bin/python -r requirements.txt -r test-requirements.txt
+
+      - name: Run tests
+        run: ./run_tests.sh

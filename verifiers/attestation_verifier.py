@@ -4,13 +4,14 @@
 import argparse
 import base64
 import json
+import os
 import re
 import secrets
 from hashlib import sha256
 
 import requests
 
-API_BASE = "https://api.redpill.ai"
+API_BASE = os.getenv("API_BASE", "https://api.redpill.ai")
 GPU_VERIFIER_API = "https://nras.attestation.nvidia.com/v3/attest/gpu"
 PHALA_TDX_VERIFIER_API = "https://cloud-api.phala.network/api/v1/attestations/verify"
 SIGSTORE_SEARCH_BASE = "https://search.sigstore.dev/?hash="
@@ -19,7 +20,11 @@ SIGSTORE_SEARCH_BASE = "https://search.sigstore.dev/?hash="
 def fetch_report(model, nonce):
     """Fetch attestation report from the API."""
     url = f"{API_BASE}/v1/attestation/report?model={model}&nonce={nonce}"
-    return requests.get(url, timeout=30).json()
+    headers = None
+    token = os.getenv("TOKEN")
+    if token:
+        headers = {"Authorization": f"Bearer {token}"}
+    return requests.get(url, headers=headers, timeout=30).json()
 
 
 def fetch_nvidia_verification(payload):
@@ -172,7 +177,7 @@ def show_compose(attestation, intel_result):
     if not app_compose:
         return
     docker_compose = json.loads(app_compose)["docker_compose_file"]
-        
+
     print("\nDocker compose manifest attested by the enclave:")
     print(docker_compose)
 

@@ -4,14 +4,12 @@
 
 1. Create and activate a Python virtual environment:
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
+UV_NO_MANAGED_PYTHON=1 UV_PYTHON_DOWNLOADS=never uv venv -p python3
 ```
 
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
-pip install -r test-requirements.txt
+uv pip install --python .venv/bin/python -r requirements.txt -r test-requirements.txt
 ```
 
 ## Running Tests
@@ -25,8 +23,7 @@ Use the provided test runner script:
 
 Or run manually:
 ```bash
-. .venv/bin/activate
-PYTHONPATH=src python -m pytest tests/ -v
+PYTHONPATH=src .venv/bin/python -m pytest tests/ -v
 ```
 
 Environment variables are automatically set by `tests/conftest.py`.
@@ -37,7 +34,7 @@ Environment variables are automatically set by `tests/conftest.py`.
 **Run a specific test file:**
 ```bash
 ./run_tests.sh tests/app/test_openai.py
-# Expands to: PYTHONPATH=src python -m pytest tests/ -v tests/app/test_openai.py
+# Expands to: PYTHONPATH=src .venv/bin/python -m pytest tests/ -v tests/app/test_openai.py
 ```
 
 **Run a specific test function:**
@@ -108,9 +105,7 @@ The test suite is designed to run in CI environments without special hardware:
 # Example GitHub Actions workflow
 - name: Run tests
   run: |
-    python3 -m venv .venv
-    . .venv/bin/activate
-    pip install -r requirements.txt
-    pip install -r test-requirements.txt
+    UV_NO_MANAGED_PYTHON=1 UV_PYTHON_DOWNLOADS=never uv venv -p python3
+    uv pip install --python .venv/bin/python -r requirements.txt -r test-requirements.txt
     ./run_tests.sh
 ```

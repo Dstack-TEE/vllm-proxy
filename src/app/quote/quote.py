@@ -1,24 +1,77 @@
 import json
 import os
-import hashlib
+import subprocess
 from dataclasses import dataclass
-from typing import Optional, Callable
+from pathlib import Path
+from typing import Optional
 
-import eth_utils
-import pynvml
 import web3
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from dstack_sdk import DstackClient
 from eth_account.messages import encode_defunct
-from nv_attestation_sdk import attestation
-from verifier import cc_admin
-from app.logger import log
 
 ED25519 = "ed25519"
 ECDSA = "ecdsa"
 GPU_ARCH = "HOPPER"
-NO_GPU_MODE = os.getenv("GPU_NO_HW_MODE", "0").lower() in {"1", "true", "yes"}
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _gpu_evidence_python() -> str:
+    return os.getenv("GPU_EVIDENCE_PYTHON", "").strip()
+
+
+def _gpu_evidence_timeout_seconds() -> float:
+    raw_value = os.getenv("GPU_EVIDENCE_TIMEOUT_SECONDS", "60").strip()
+    try:
+        return float(raw_value)
+    except ValueError:
+        return 60.0
+
+
+def _truncate(text: str, limit: int = 1500) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... (truncated, total {len(text)} chars)"
+
+
+def _validate_gpu_evidence(payload: object) -> list[dict[str, str]]:
+    if not isinstance(payload, list):
+        raise RuntimeError(f"GPU evidence must be a list, got {type(payload).__name__}")
+    if not payload:
+        raise RuntimeError("GPU evidence list is empty")
+
+    validated: list[dict[str, str]] = []
+    for idx, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                f"GPU evidence item at index {idx} must be an object, got {type(item).__name__}"
+            )
+
+        missing_keys = [k for k in ("certificate", "evidence", "arch") if k not in item]
+        if missing_keys:
+            raise RuntimeError(
+                f"GPU evidence item at index {idx} missing keys: {', '.join(missing_keys)}"
+            )
+
+        certificate = item.get("certificate")
+        evidence = item.get("evidence")
+        arch = item.get("arch")
+        if not isinstance(certificate, str) or not certificate:
+            raise RuntimeError(f"GPU evidence item at index {idx} has empty certificate")
+        if not isinstance(evidence, str) or not evidence:
+            raise RuntimeError(f"GPU evidence item at index {idx} has empty evidence")
+        if not isinstance(arch, str) or not arch:
+            raise RuntimeError(f"GPU evidence item at index {idx} has empty arch")
+
+        validated.append({"certificate": certificate, "evidence": evidence, "arch": arch})
+    return validated
 
 
 @dataclass
@@ -66,38 +119,66 @@ def _parse_nonce(nonce: Optional[bytes | str]) -> bytes:
 
 
 def _collect_gpu_evidence(nonce_hex: str, no_gpu_mode: bool) -> list:
-    if no_gpu_mode:
-        log.info("GPU evidence no-GPU mode enabled; using canned evidence")
-        return cc_admin.collect_gpu_evidence_remote(nonce_hex, no_gpu_mode=True)
+    gpu_evidence_python = _gpu_evidence_python()
+    if gpu_evidence_python:
+        script_path = Path(__file__).with_name("ppcie_collect.py")
+        cmd = [gpu_evidence_python, str(script_path), "--nonce", nonce_hex, "--ppcie-mode"]
+        if no_gpu_mode:
+            cmd.append("--no-gpu-mode")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_gpu_evidence_timeout_seconds(),
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"GPU evidence Python interpreter not found: {gpu_evidence_python}"
+            ) from error
+        except subprocess.CalledProcessError as error:
+            raise RuntimeError(
+                "GPU evidence subprocess failed. "
+                f"exit={error.returncode} stdout={_truncate(error.stdout or '')!r} "
+                f"stderr={_truncate(error.stderr or '')!r}"
+            ) from error
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"GPU evidence subprocess timed out after {error.timeout}s"
+            ) from error
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "GPU evidence subprocess returned invalid JSON (stdout must be JSON only). "
+                f"stdout={_truncate(result.stdout)!r} stderr={_truncate(result.stderr)!r}"
+            ) from error
+        try:
+            return _validate_gpu_evidence(payload)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "GPU evidence subprocess returned invalid evidence shape. "
+                f"error={error} stdout={_truncate(result.stdout)!r} stderr={_truncate(result.stderr)!r}"
+            ) from error
 
     try:
-        pynvml.nvmlInit()
-        device_count = pynvml.nvmlDeviceGetCount()
-        if device_count == 1:
-            return cc_admin.collect_gpu_evidence_remote(nonce_hex)
-        attester = attestation.Attestation()
-        attester.set_name("HOPPER")
-        attester.set_nonce(nonce_hex)
-        attester.set_claims_version("2.0")
-        attester.set_ocsp_nonce_disabled(True)
-        attester.add_verifier(
-            dev=attestation.Devices.GPU,
-            env=attestation.Environment["REMOTE"],
-            url=None,
-            evidence="",
+        from verifier import cc_admin
+    except ImportError as error:
+        raise RuntimeError(
+            "nv-ppcie-verifier is required for GPU evidence collection; either run the GPU-enabled "
+            "image or set GPU_EVIDENCE_PYTHON to a Python interpreter with nv-ppcie-verifier installed"
+        ) from error
+
+    try:
+        payload = cc_admin.collect_gpu_evidence_remote(
+            nonce_hex, no_gpu_mode=no_gpu_mode, ppcie_mode=True
         )
-        return attester.get_evidence(options={"ppcie_mode": False})
-    except pynvml.NVMLError as error:
-        log.error("NVML error while collecting GPU evidence: %s", error)
-        raise Exception("NVML error during GPU evidence collection") from error
     except Exception as error:
-        log.error("GPU evidence collection failed: %s", error)
-        raise
-    finally:
-        try:
-            pynvml.nvmlShutdown()
-        except pynvml.NVMLError:
-            pass
+        raise RuntimeError(f"GPU evidence collection failed: {error}") from error
+
+    return _validate_gpu_evidence(payload)
 
 
 def _build_nvidia_payload(nonce_hex: str, evidences: list) -> str:
@@ -155,7 +236,7 @@ def generate_attestation(
     quote_result = client.get_quote(report_data)
 
     # Use request_nonce directly for GPU attestation
-    gpu_evidence = _collect_gpu_evidence(request_nonce_hex, NO_GPU_MODE)
+    gpu_evidence = _collect_gpu_evidence(request_nonce_hex, _bool_env("GPU_NO_HW_MODE", False))
     if not gpu_evidence:
         raise Exception("No GPU evidence found")
     nvidia_payload = _build_nvidia_payload(request_nonce_hex, gpu_evidence)

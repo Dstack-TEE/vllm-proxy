@@ -1,0 +1,2 @@
+# Install into a separate environment only (nv-ppcie-verifier pins typing-extensions==4.10.0).
+nv-ppcie-verifier==1.6.4

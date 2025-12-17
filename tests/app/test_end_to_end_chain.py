@@ -1,7 +1,7 @@
 import json
 import os
 
-# Set GPU_NO_HW_MODE before importing app (NO_GPU_MODE is read at module import time)
+# Enable no-GPU mode for environments without NVIDIA hardware.
 os.environ["GPU_NO_HW_MODE"] = "1"
 
 from hashlib import sha256
@@ -12,7 +12,6 @@ import respx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from tests.app.test_helpers import TEST_AUTH_HEADER
 from tests.app.sample_dstack_data import NRAS_SAMPLE_RESPONSE, NRAS_SAMPLE_PPCIE_RESPONSE
 from verifiers.attestation_verifier import check_report_data, check_gpu, check_tdx_quote
@@ -22,6 +21,7 @@ from verifiers.attestation_verifier import check_report_data, check_gpu, check_t
 def client():
     if not os.path.exists('/var/run/dstack.sock'):
         pytest.skip("Not in a real TEE environment.")
+    from app.main import app
     return TestClient(app)
 
 @pytest.mark.parametrize("nras_response", [NRAS_SAMPLE_RESPONSE, NRAS_SAMPLE_PPCIE_RESPONSE])
@@ -35,7 +35,11 @@ def test_chain_of_trust_end_to_end(client, nras_response):
         upstream_payload = {"id": "chatcmpl-test-001", "object": "chat.completion", "choices": [{"message": {"role": "assistant", "content": "Hi there!"}, "index": 0, "finish_reason": "stop"}]}
         respx.mock.post(vllm_url).mock(return_value=httpx.Response(200, json=upstream_payload))
 
-        response = client.post("/v1/chat/completions", json=request_payload, headers={"Authorization": TEST_AUTH_HEADER})
+        response = client.post(
+            "/v1/chat/completions",
+            json=request_payload,
+            headers={"Authorization": TEST_AUTH_HEADER, "X-User-Tier": "premium"},
+        )
         assert response.status_code == 200
         chat_id = response.json()["id"]
 
