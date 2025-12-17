@@ -70,7 +70,7 @@ def _metrics_max_age_seconds() -> float:
 class TrafficControl:
     def __init__(self, vllm_base_url: str) -> None:
         base = vllm_base_url.rstrip("/")
-        self._metrics_urls = (f"{base}/v1/metrics", f"{base}/metrics")
+        self._metrics_url = f"{base}/metrics"
 
         self._busy = False
         self._last_ok_monotonic: Optional[float] = None
@@ -134,19 +134,15 @@ class TrafficControl:
     async def refresh_once(self) -> None:
         timeout = httpx.Timeout(_metrics_timeout_seconds())
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for url in self._metrics_urls:
-                try:
-                    resp = await client.get(url)
-                except Exception:
-                    continue
-                if resp.status_code == 404:
-                    continue
-                if resp.status_code != 200:
-                    continue
-                try:
-                    self._update_from_metrics(resp.text)
-                except Exception:
-                    continue
+            try:
+                resp = await client.get(self._metrics_url)
+            except Exception:
+                return
+            if resp.status_code != 200:
+                return
+            try:
+                self._update_from_metrics(resp.text)
+            except Exception:
                 return
 
     async def _run(self) -> None:

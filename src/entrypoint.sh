@@ -1,3 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
-python3 run.py
+set -e
+exec python3 run.py

@@ -21,12 +21,14 @@ def setup_verifier_mock():
     # Mock the verifier module
     mock_cc_admin = MagicMock()
     mock_cc_admin.collect_gpu_evidence.return_value = [{
-        "attestationReportHexStr": "mock_report",
-        "certChainBase64Encoded": "mock_cert_chain"
+        "certificate": "mock_cert_chain",
+        "evidence": "mock_evidence",
+        "arch": "HOPPER",
     }]
     mock_cc_admin.collect_gpu_evidence_remote.return_value = [{
-        "attestationReportHexStr": "mock_report",
-        "certChainBase64Encoded": "mock_cert_chain"
+        "certificate": "mock_cert_chain",
+        "evidence": "mock_evidence",
+        "arch": "HOPPER",
     }]
     mock_verifier = MagicMock()
     mock_verifier.cc_admin = mock_cc_admin

@@ -92,6 +92,7 @@ async def test_stream_chat_completions_success(respx_mock, client):
     # Verify response
     assert response.status_code == 200
     assert route.called
+    assert response.headers.get("x-accel-buffering") == "no"
 
     # Collect all streaming responses
     chunks = []

@@ -1,7 +1,7 @@
 import json
 import os
 
-# Set GPU_NO_HW_MODE before importing app (NO_GPU_MODE is read at module import time)
+# Enable no-GPU mode for environments without NVIDIA hardware.
 os.environ["GPU_NO_HW_MODE"] = "1"
 
 from hashlib import sha256

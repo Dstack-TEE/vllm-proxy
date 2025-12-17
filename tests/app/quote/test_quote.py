@@ -10,7 +10,9 @@ from pathlib import Path
 class TestQuote(unittest.TestCase):
     def setUp(self):
         self.mock_cc_admin = types.SimpleNamespace(
-            collect_gpu_evidence_remote=lambda nonce, **kwargs: [{"mock": "gpu"}],
+            collect_gpu_evidence_remote=lambda nonce, **kwargs: [
+                {"certificate": "mock_cert_chain", "evidence": "mock_evidence", "arch": "HOPPER"}
+            ],
         )
 
         attestation_instance = types.SimpleNamespace(
@@ -106,5 +108,4 @@ class TestQuote(unittest.TestCase):
     def test_random_nonce_generation(self):
         result = self.quote.generate_attestation(self.quote.ed25519_context)
         self.assertEqual(len(bytes.fromhex(result["request_nonce"])), 32)
-
 
