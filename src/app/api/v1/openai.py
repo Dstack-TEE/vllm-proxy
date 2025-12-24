@@ -20,6 +20,7 @@ from app.api.response.response import (
 )
 from app.cache.cache import cache
 from app.logger import log
+from app.metrics import get_proxy_metrics
 from app.quote.quote import (
     ECDSA,
     ED25519,
@@ -65,7 +66,6 @@ async def stream_vllm_response(
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
-    requested_model: Optional[str] = None,
 ):
     """
     Handle streaming vllm request
@@ -75,7 +75,6 @@ async def stream_vllm_response(
         request_hash: Optional hash from request header (X-Request-Hash). Used by trusted clients to provide
                      pre-calculated request hash, avoiding redundant hash computation. Falls back to
                      calculating hash from request_body if not provided
-        requested_model: The model name requested by the client
     Returns:
         A streaming response
     """
@@ -103,11 +102,6 @@ async def stream_vllm_response(
                         # Extract the cache key (data.id) from the first chunk
                         if not chat_id:
                             chat_id = chunk_data.get("id")
-                        
-                        # Override the model name if requested_model is provided
-                        if requested_model and "model" in chunk_data:
-                            chunk_data["model"] = requested_model
-                            final_chunk = f"data: {json.dumps(chunk_data)}\n"
                             
                     except Exception as e:
                         error_message = f"Failed to parse chunk: {e}\n The original data is: {data}"
@@ -148,6 +142,7 @@ async def stream_vllm_response(
         generate_stream(response),
         background=BackgroundTasks([response.aclose, client.aclose]),
         media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
     )
 
 
@@ -157,7 +152,6 @@ async def non_stream_vllm_response(
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
-    requested_model: Optional[str] = None,
 ):
     """
     Handle non-streaming responses
@@ -167,7 +161,6 @@ async def non_stream_vllm_response(
         request_hash: Optional hash from request header (X-Request-Hash). Used by trusted clients to provide
                      pre-calculated request hash, avoiding redundant hash computation. Falls back to
                      calculating hash from request_body if not provided
-        requested_model: The model name requested by the client
     Returns:
         The response data
     """
@@ -186,10 +179,6 @@ async def non_stream_vllm_response(
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
         response_data = response.json()
-        
-        # Override the model name if requested_model is provided
-        if requested_model and "model" in response_data:
-            response_data["model"] = requested_model
             
         # Cache the request-response pair using the chat ID
         chat_id = response_data.get("id")
@@ -270,18 +259,16 @@ async def chat_completions(
     is_stream = modified_json.get(
         "stream", False
     )  # Default to non-streaming if not specified
-    requested_model = modified_json.get("model")
-
     modified_request_body = json.dumps(modified_json).encode("utf-8")
     if is_stream:
         # Create a streaming response
         return await stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash, requested_model
+            VLLM_URL, request_body, modified_request_body, x_request_hash
         )
     else:
         # Handle non-streaming response
         response_data = await non_stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash, requested_model
+            VLLM_URL, request_body, modified_request_body, x_request_hash
         )
         return JSONResponse(content=response_data)
 
@@ -301,18 +288,16 @@ async def completions(
     is_stream = modified_json.get(
         "stream", False
     )  # Default to non-streaming if not specified
-    requested_model = modified_json.get("model")
-
     modified_request_body = json.dumps(modified_json).encode("utf-8")
     if is_stream:
         # Create a streaming response
         return await stream_vllm_response(
-            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash, requested_model
+            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash
         )
     else:
         # Handle non-streaming response
         response_data = await non_stream_vllm_response(
-            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash, requested_model
+            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash
         )
         return JSONResponse(content=response_data)
 
@@ -355,11 +340,25 @@ async def signature(request: Request, chat_id: str, signing_algo: str = None):
 # Metrics of vLLM instance
 @router.get("/metrics")
 async def metrics(request: Request):
-    async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT)) as client:
-        response = await client.get(VLLM_METRICS_URL)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return PlainTextResponse(response.text)
+    # Get local metrics from the proxy
+    local_metrics = get_proxy_metrics()
+    
+    # Fetch metrics from the vLLM backend
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT)) as client:
+            response = await client.get(VLLM_METRICS_URL)
+            if response.status_code == 200:
+                remote_metrics = response.text
+            else:
+                log.warning(f"Failed to fetch vLLM metrics: {response.status_code}")
+                remote_metrics = f"# Failed to fetch vLLM metrics: {response.status_code}"
+    except Exception as e:
+        log.error(f"Error fetching vLLM metrics: {e}")
+        remote_metrics = f"# Error fetching vLLM metrics: {e}"
+        
+    # Combine both and return
+    combined_metrics = f"{local_metrics}\n\n# --- vLLM Backend Metrics ---\n\n{remote_metrics}"
+    return PlainTextResponse(combined_metrics)
 
 
 @router.get("/models")
