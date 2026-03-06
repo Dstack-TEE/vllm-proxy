@@ -130,6 +130,16 @@ def parse_e2ee_context(
         raise ValueError("Unsupported X-E2EE-Version; supported versions are 1 and 2")
 
     parsed_ts: int | None = None
+    if version == E2EE_VERSION_V2:
+        if not x_e2ee_nonce or not x_e2ee_timestamp:
+            raise ValueError("E2EE v2 requires X-E2EE-Nonce and X-E2EE-Timestamp headers")
+        if len(x_e2ee_nonce) < 16:
+            raise ValueError("X-E2EE-Nonce must be at least 16 characters")
+        try:
+            parsed_ts = int(x_e2ee_timestamp)
+        except ValueError as exc:
+            raise ValueError("X-E2EE-Timestamp must be a unix timestamp in seconds") from exc
+
     return E2EEContext(
         signing_algo=algo,
         client_public_key_hex=x_client_pub_key,
