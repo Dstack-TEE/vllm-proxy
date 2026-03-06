@@ -251,16 +251,14 @@ async def attestation_report(
 
     context = ecdsa_context if signing_algo == ECDSA else ed25519_context
 
-    # If signing_address is specified and doesn't match this server's address, return 404
-    if signing_address and context.signing_address.lower() != signing_address.lower():
-        raise HTTPException(status_code=404, detail="Signing address not found on this server")
     try:
-        attestation = generate_attestation(context, nonce)
+        attestation = dict(generate_attestation(context, nonce))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    attestation["signing_public_key"] = local_model_public_key_hex(signing_algo)
     resp = dict(attestation)
-    resp["signing_public_key"] = local_model_public_key_hex(signing_algo)
+    resp["signing_public_key"] = attestation["signing_public_key"]
     resp["all_attestations"] = [attestation]
     return resp
 

@@ -49,6 +49,11 @@ class E2EEInvalidVersionError(E2EEError):
         super().__init__(message, "e2ee_invalid_version")
 
 
+class E2EEInvalidNonceError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_invalid_nonce")
+
+
 class E2EEReplayDetectedError(E2EEError):
     def __init__(self, message: str):
         super().__init__(message, "e2ee_replay_detected")
@@ -182,7 +187,7 @@ def parse_e2ee_context(
         if not x_e2ee_nonce or not x_e2ee_timestamp:
             raise E2EEHeaderMissingError("E2EE v2 requires X-E2EE-Nonce and X-E2EE-Timestamp headers")
         if len(x_e2ee_nonce) < 16:
-            raise E2EEInvalidVersionError("X-E2EE-Nonce must be at least 16 characters")
+            raise E2EEInvalidNonceError("X-E2EE-Nonce must be at least 16 characters")
         try:
             parsed_ts = int(x_e2ee_timestamp)
         except ValueError as exc:

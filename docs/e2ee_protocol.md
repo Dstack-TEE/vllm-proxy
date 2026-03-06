@@ -19,7 +19,7 @@ Clients can obtain the server's public key (either ECDSA or Ed25519 depending on
 
 The response contains:
 - `signing_address`: The EVM address (for ECDSA) or a compressed address (for Ed25519).
-- `signing_public_key`: The raw hex-encoded public key (no `0x` prefix).
+- `signing_public_key`: The raw hex-encoded public key (no `0x` prefix). Available at both the top-level and within each item in `all_attestations`.
   - **Ed25519**: 32 bytes (64 hex characters). 
   - **ECDSA**: 64 bytes (128 hex characters), representing uncompressed point `(x, y)` without the `04` prefix.
 
@@ -81,6 +81,7 @@ Format: `v2|resp|algo={algo}|model={model}|id={obj_id}|choice={choice_index}|fie
 | `e2ee_invalid_public_key` | Public key format or length is invalid. |
 | `e2ee_model_key_mismatch` | `X-Model-Pub-Key` does not match the server instance. |
 | `e2ee_invalid_version` | Unsupported `X-E2EE-Version`. |
+| `e2ee_invalid_nonce` | Nonce length or format is invalid (e.g., < 16 chars). |
 | `e2ee_replay_detected` | Nonce + Timestamp has already been consumed. |
 | `e2ee_invalid_timestamp` | Timestamp is malformed or outside the allowed window. |
 | `e2ee_decryption_failed` | MAC tag mismatch or invalid ciphertext format. |

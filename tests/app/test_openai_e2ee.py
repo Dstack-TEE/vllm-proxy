@@ -17,6 +17,7 @@ from app.api.v1.e2ee import (
     E2EEContext,
     E2EEReplayDetectedError,
     E2EEInvalidVersionError,
+    E2EEInvalidNonceError,
     E2EEModelKeyMismatchError,
     E2EEHeaderMissingError,
     claim_e2ee_nonce,
@@ -200,6 +201,16 @@ def test_parse_e2ee_context_v2_requires_nonce_and_timestamp():
                 x_e2ee_nonce=None,
                 x_e2ee_timestamp=None,
             )
+        
+        with pytest.raises(E2EEInvalidNonceError, match="must be at least 16 characters"):
+            parse_e2ee_context(
+                x_signing_algo="ecdsa",
+                x_client_pub_key="11" * 64,
+                x_model_pub_key="22" * 64,
+                x_e2ee_version="2",
+                x_e2ee_nonce="short",
+                x_e2ee_timestamp="1700000000",
+            )
 
 
 def test_parse_e2ee_context_v2_replay_protection():
@@ -242,6 +253,7 @@ def test_attestation_report_includes_signing_public_key():
     data = response.json()
     assert "signing_public_key" in data
     assert len(data["signing_public_key"]) == 128
+    assert data["all_attestations"][0]["signing_public_key"] == data["signing_public_key"]
 
     # Test Ed25519
     response = client.get("/v1/attestation/report?signing_algo=ed25519", headers={"Authorization": TEST_AUTH_HEADER})
@@ -249,3 +261,4 @@ def test_attestation_report_includes_signing_public_key():
     data = response.json()
     assert "signing_public_key" in data
     assert len(data["signing_public_key"]) == 64
+    assert data["all_attestations"][0]["signing_public_key"] == data["signing_public_key"]
