@@ -18,7 +18,7 @@ Supported Algorithms:
 Clients can obtain the server's public key (either ECDSA or Ed25519 depending on the environment) via the `/v1/attestation/report` endpoint.
 
 The response contains:
-- `signing_address`: The EVM address (for ECDSA) or a compressed address (for Ed25519).
+- `signing_address`: The EVM address (for ECDSA) or 32-byte raw public key hex (64 chars) (for Ed25519).
 - `signing_public_key`: The raw hex-encoded public key (no `0x` prefix). Available at both the top-level and within each item in `all_attestations`.
   - **Ed25519**: 32 bytes (64 hex characters). 
   - **ECDSA**: 64 bytes (128 hex characters), representing uncompressed point `(x, y)` without the `04` prefix.
