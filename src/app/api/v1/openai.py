@@ -14,9 +14,16 @@ from fastapi.responses import (
 
 from app.api.helper.auth import verify_authorization_header
 from app.api.response.response import (
+    error,
     invalid_signing_algo,
     not_found,
     unexpect_error,
+)
+from app.api.v1.e2ee import (
+    decrypt_request_json,
+    encrypt_chat_completion_chunk,
+    encrypt_chat_completion_response,
+    parse_e2ee_context,
 )
 from app.cache.cache import cache
 from app.logger import log
@@ -66,6 +73,7 @@ async def stream_vllm_response(
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
+    e2ee_ctx=None,
 ):
     """
     Handle streaming vllm request
@@ -98,11 +106,14 @@ async def stream_vllm_response(
                 if data and data != "[DONE]":
                     try:
                         chunk_data = json.loads(data)
-                        
+
                         # Extract the cache key (data.id) from the first chunk
                         if not chat_id:
                             chat_id = chunk_data.get("id")
-                            
+
+                        chunk_data = encrypt_chat_completion_chunk(chunk_data, e2ee_ctx)
+                        final_chunk = f"data: {json.dumps(chunk_data)}\n\n"
+
                     except Exception as e:
                         error_message = f"Failed to parse chunk: {e}\n The original data is: {data}"
                         log.error(error_message)
@@ -152,6 +163,7 @@ async def non_stream_vllm_response(
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
+    e2ee_ctx=None,
 ):
     """
     Handle non-streaming responses
@@ -179,7 +191,8 @@ async def non_stream_vllm_response(
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
         response_data = response.json()
-            
+        response_data = encrypt_chat_completion_response(response_data, e2ee_ctx)
+
         # Cache the request-response pair using the chat ID
         chat_id = response_data.get("id")
         if chat_id:
@@ -249,10 +262,30 @@ async def attestation_report(
 async def chat_completions(
     request: Request,
     x_request_hash: Optional[str] = Header(None, alias="X-Request-Hash"),
+    x_signing_algo: Optional[str] = Header(None, alias="X-Signing-Algo"),
+    x_client_pub_key: Optional[str] = Header(None, alias="X-Client-Pub-Key"),
+    x_model_pub_key: Optional[str] = Header(None, alias="X-Model-Pub-Key"),
+    x_e2ee_version: Optional[str] = Header(None, alias="X-E2EE-Version"),
+    x_e2ee_nonce: Optional[str] = Header(None, alias="X-E2EE-Nonce"),
+    x_e2ee_timestamp: Optional[str] = Header(None, alias="X-E2EE-Timestamp"),
 ):
     # Keep original request body to calculate the request hash for attestation
     request_body = await request.body()
     request_json = json.loads(request_body)
+
+    try:
+        e2ee_ctx = parse_e2ee_context(
+            x_signing_algo=x_signing_algo,
+            x_client_pub_key=x_client_pub_key,
+            x_model_pub_key=x_model_pub_key,
+            x_e2ee_version=x_e2ee_version,
+            x_e2ee_nonce=x_e2ee_nonce,
+            x_e2ee_timestamp=x_e2ee_timestamp,
+        )
+        request_json = decrypt_request_json(request_json, e2ee_ctx)
+    except ValueError as exc:
+        return error(status_code=400, message=str(exc), type="invalid_e2ee_request")
+
     modified_json = strip_empty_tool_calls(request_json)
 
     # Check if the request is for streaming or non-streaming
@@ -263,12 +296,12 @@ async def chat_completions(
     if is_stream:
         # Create a streaming response
         return await stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash
+            VLLM_URL, request_body, modified_request_body, x_request_hash, e2ee_ctx
         )
     else:
         # Handle non-streaming response
         response_data = await non_stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash
+            VLLM_URL, request_body, modified_request_body, x_request_hash, e2ee_ctx
         )
         return JSONResponse(content=response_data)
 
@@ -278,10 +311,32 @@ async def chat_completions(
 async def completions(
     request: Request,
     x_request_hash: Optional[str] = Header(None, alias="X-Request-Hash"),
+    x_signing_algo: Optional[str] = Header(None, alias="X-Signing-Algo"),
+    x_client_pub_key: Optional[str] = Header(None, alias="X-Client-Pub-Key"),
+    x_model_pub_key: Optional[str] = Header(None, alias="X-Model-Pub-Key"),
+    x_e2ee_version: Optional[str] = Header(None, alias="X-E2EE-Version"),
+    x_e2ee_nonce: Optional[str] = Header(None, alias="X-E2EE-Nonce"),
+    x_e2ee_timestamp: Optional[str] = Header(None, alias="X-E2EE-Timestamp"),
 ):
     # Keep original request body to calculate the request hash for attestation
     request_body = await request.body()
     request_json = json.loads(request_body)
+
+    # E2EE is currently supported only for /chat/completions
+    if any([
+        x_signing_algo,
+        x_client_pub_key,
+        x_model_pub_key,
+        x_e2ee_version,
+        x_e2ee_nonce,
+        x_e2ee_timestamp,
+    ]):
+        return error(
+            status_code=400,
+            message="E2EE is only supported on /v1/chat/completions",
+            type="invalid_e2ee_request",
+        )
+
     modified_json = strip_empty_tool_calls(request_json)
 
     # Check if the request is for streaming or non-streaming
