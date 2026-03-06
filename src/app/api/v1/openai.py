@@ -20,9 +20,11 @@ from app.api.response.response import (
     unexpect_error,
 )
 from app.api.v1.e2ee import (
+    claim_e2ee_nonce,
     decrypt_request_json,
     encrypt_chat_completion_chunk,
     encrypt_chat_completion_response,
+    get_e2ee_response_headers,
     parse_e2ee_context,
 )
 from app.cache.cache import cache
@@ -153,7 +155,10 @@ async def stream_vllm_response(
         generate_stream(response),
         background=BackgroundTasks([response.aclose, client.aclose]),
         media_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no"},
+        headers={
+            "X-Accel-Buffering": "no",
+            **get_e2ee_response_headers(e2ee_ctx),
+        },
     )
 
 
@@ -283,6 +288,8 @@ async def chat_completions(
             x_e2ee_timestamp=x_e2ee_timestamp,
         )
         request_json = decrypt_request_json(request_json, e2ee_ctx)
+        if e2ee_ctx:
+            claim_e2ee_nonce(e2ee_ctx)
     except ValueError as exc:
         return error(status_code=400, message=str(exc), type="invalid_e2ee_request")
 
@@ -303,7 +310,10 @@ async def chat_completions(
         response_data = await non_stream_vllm_response(
             VLLM_URL, request_body, modified_request_body, x_request_hash, e2ee_ctx
         )
-        return JSONResponse(content=response_data)
+        return JSONResponse(
+            content=response_data,
+            headers=get_e2ee_response_headers(e2ee_ctx),
+        )
 
 
 # VLLM completions

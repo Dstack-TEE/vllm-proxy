@@ -130,17 +130,6 @@ def parse_e2ee_context(
         raise ValueError("Unsupported X-E2EE-Version; supported versions are 1 and 2")
 
     parsed_ts: int | None = None
-    if version == E2EE_VERSION_V2:
-        if not x_e2ee_nonce or not x_e2ee_timestamp:
-            raise ValueError("E2EE v2 requires X-E2EE-Nonce and X-E2EE-Timestamp headers")
-        if len(x_e2ee_nonce) < 16:
-            raise ValueError("X-E2EE-Nonce must be at least 16 characters")
-        try:
-            parsed_ts = int(x_e2ee_timestamp)
-        except ValueError as exc:
-            raise ValueError("X-E2EE-Timestamp must be a unix timestamp in seconds") from exc
-        _validate_replay_and_timestamp(x_e2ee_nonce, parsed_ts, algo)
-
     return E2EEContext(
         signing_algo=algo,
         client_public_key_hex=x_client_pub_key,
@@ -149,6 +138,23 @@ def parse_e2ee_context(
         nonce=x_e2ee_nonce,
         timestamp=parsed_ts,
     )
+
+
+def claim_e2ee_nonce(e2ee_ctx: E2EEContext) -> None:
+    if e2ee_ctx.version == E2EE_VERSION_V2:
+        if e2ee_ctx.nonce is None or e2ee_ctx.timestamp is None:
+            raise ValueError("E2EE v2 requires nonce and timestamp for replay protection")
+        _validate_replay_and_timestamp(e2ee_ctx.nonce, e2ee_ctx.timestamp, e2ee_ctx.signing_algo)
+
+
+def get_e2ee_response_headers(e2ee_ctx: E2EEContext | None) -> dict[str, str]:
+    if not e2ee_ctx:
+        return {"X-E2EE-Applied": "false"}
+    return {
+        "X-E2EE-Applied": "true",
+        "X-E2EE-Version": e2ee_ctx.version,
+        "X-E2EE-Algo": e2ee_ctx.signing_algo,
+    }
 
 
 def _derive_aes_key(shared_secret: bytes, signing_algo: str) -> bytes:
@@ -200,22 +206,24 @@ def _build_response_aad(
 
 
 def _ed25519_public_to_x25519_public_key(pub_hex: str) -> x25519.X25519PublicKey:
-    raw = bytes.fromhex(pub_hex)
-    if len(raw) != 32:
+    # Ed25519 public key is 32 bytes (little-endian y-coordinate with x-sign bit)
+    y_bytes = bytes.fromhex(pub_hex)
+    if len(y_bytes) != 32:
         raise ValueError("Ed25519 public key must be 32 bytes")
-
-    y_bytes = bytearray(raw)
-    y_bytes[31] &= 0x7F
-    y = int.from_bytes(y_bytes, byteorder="little")
+    
+    # RFC 7748: u = (1 + y) / (1 - y) mod p
+    # y is the first 255 bits of the Ed25519 public key.
+    y_int = int.from_bytes(y_bytes, byteorder="little")
+    y = y_int & ((1 << 255) - 1)
+    
     p = 2**255 - 19
-
+    
+    # RFC 7748: u = (1 + y) / (1 - y) mod p
     if y == 1:
         u = 0
     else:
-        one_minus_y = (1 - y) % p
-        inv_one_minus_y = pow(one_minus_y, p - 2, p)
-        u = ((1 + y) * inv_one_minus_y) % p
-
+        u = ((1 + y) * pow(1 - y, p - 2, p)) % p
+    
     return x25519.X25519PublicKey.from_public_bytes(u.to_bytes(32, byteorder="little"))
 
 

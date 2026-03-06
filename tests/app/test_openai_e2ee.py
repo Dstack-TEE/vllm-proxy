@@ -182,15 +182,16 @@ def test_decrypt_request_json_does_not_mutate_input_payload():
 
 def test_parse_e2ee_context_v2_requires_nonce_and_timestamp():
     with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value="22" * 64):
-        with pytest.raises(ValueError, match="requires X-E2EE-Nonce and X-E2EE-Timestamp"):
-            parse_e2ee_context(
-                x_signing_algo="ecdsa",
-                x_client_pub_key="11" * 64,
-                x_model_pub_key="22" * 64,
-                x_e2ee_version="2",
-                x_e2ee_nonce=None,
-                x_e2ee_timestamp=None,
-            )
+        ctx = parse_e2ee_context(
+            x_signing_algo="ecdsa",
+            x_client_pub_key="11" * 64,
+            x_model_pub_key="22" * 64,
+            x_e2ee_version="2",
+            x_e2ee_nonce=None,
+            x_e2ee_timestamp=None,
+        )
+        with pytest.raises(ValueError, match="requires nonce and timestamp"):
+            claim_e2ee_nonce(ctx)
 
 
 def test_parse_e2ee_context_v2_replay_protection():
@@ -207,16 +208,10 @@ def test_parse_e2ee_context_v2_replay_protection():
             x_e2ee_timestamp=now_ts,
         )
         assert ctx.version == "2"
+        claim_e2ee_nonce(ctx)
 
         with pytest.raises(ValueError, match="Replay detected"):
-            parse_e2ee_context(
-                x_signing_algo="ecdsa",
-                x_client_pub_key="11" * 64,
-                x_model_pub_key="22" * 64,
-                x_e2ee_version="2",
-                x_e2ee_nonce="abcd1234abcd1234",
-                x_e2ee_timestamp=now_ts,
-            )
+            claim_e2ee_nonce(ctx)
 
 
 def test_parse_e2ee_context_allows_ed25519():
