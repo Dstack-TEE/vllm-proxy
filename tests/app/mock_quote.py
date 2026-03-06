@@ -1,7 +1,8 @@
-"""Mock quote module used in unit tests."""
 import json
 import os
 from dataclasses import dataclass
+from typing import Any
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 ED25519 = "ed25519"
 ECDSA = "ecdsa"
@@ -9,10 +10,16 @@ GPU_ARCH = "HOPPER"
 
 
 @dataclass
+class MockAccount:
+    key: bytes
+
+@dataclass
 class SigningContext:
     method: str
     signing_address: str
     attested_key_bytes: bytes
+    _raw_account: MockAccount | None = None
+    _ed_private: Any | None = None
 
     def sign(self, content: str) -> str:
         if self.method == ECDSA:
@@ -20,8 +27,12 @@ class SigningContext:
         return f"mocked_{content}"
 
 
-ed25519_context = SigningContext(ED25519, "11" * 32, b"\x01" * 32)
-ecdsa_context = SigningContext(ECDSA, "0xMockECDSAAddress", b"\x02" * 32)
+ed25519_context = SigningContext(
+    ED25519, "11" * 32, b"\x01" * 32, _ed_private=ed25519.Ed25519PrivateKey.generate()
+)
+ecdsa_context = SigningContext(
+    ECDSA, "0xMockECDSAAddress", b"\x02" * 32, _raw_account=MockAccount(key=os.urandom(32))
+)
 
 
 def sign_message(context: SigningContext, content: str) -> str:

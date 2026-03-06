@@ -20,11 +20,13 @@ from app.api.response.response import (
     unexpect_error,
 )
 from app.api.v1.e2ee import (
+    E2EEError,
     claim_e2ee_nonce,
     decrypt_request_json,
     encrypt_chat_completion_chunk,
     encrypt_chat_completion_response,
     get_e2ee_response_headers,
+    local_model_public_key_hex,
     parse_e2ee_context,
 )
 from app.cache.cache import cache
@@ -258,6 +260,7 @@ async def attestation_report(
         raise HTTPException(status_code=400, detail=str(exc))
 
     resp = dict(attestation)
+    resp["signing_public_key"] = local_model_public_key_hex(signing_algo)
     resp["all_attestations"] = [attestation]
     return resp
 
@@ -290,6 +293,8 @@ async def chat_completions(
         request_json = decrypt_request_json(request_json, e2ee_ctx)
         if e2ee_ctx:
             claim_e2ee_nonce(e2ee_ctx)
+    except E2EEError as exc:
+        return error(status_code=400, message=str(exc), type=exc.error_type)
     except ValueError as exc:
         return error(status_code=400, message=str(exc), type="invalid_e2ee_request")
 

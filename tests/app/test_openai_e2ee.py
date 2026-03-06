@@ -15,6 +15,10 @@ from app.main import app
 from app.api.v1.openai import VLLM_URL, VLLM_COMPLETIONS_URL
 from app.api.v1.e2ee import (
     E2EEContext,
+    E2EEReplayDetectedError,
+    E2EEInvalidVersionError,
+    E2EEModelKeyMismatchError,
+    E2EEHeaderMissingError,
     claim_e2ee_nonce,
     decrypt_request_json,
     parse_e2ee_context,
@@ -108,7 +112,7 @@ async def test_chat_completions_e2ee_invalid_headers_returns_400():
 
     with patch(
         "app.api.v1.openai.parse_e2ee_context",
-        side_effect=ValueError("X-Model-Pub-Key does not match this proxy instance"),
+        side_effect=E2EEModelKeyMismatchError("X-Model-Pub-Key does not match this proxy instance"),
     ):
         response = client.post(
             "/v1/chat/completions",
@@ -123,7 +127,7 @@ async def test_chat_completions_e2ee_invalid_headers_returns_400():
 
     assert response.status_code == 400
     body = response.json()
-    assert body["error"]["type"] == "invalid_e2ee_request"
+    assert body["error"]["type"] == "e2ee_model_key_mismatch"
 
 
 @pytest.mark.asyncio
@@ -187,7 +191,7 @@ def test_decrypt_request_json_does_not_mutate_input_payload():
 
 def test_parse_e2ee_context_v2_requires_nonce_and_timestamp():
     with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value="22" * 64):
-        with pytest.raises(ValueError, match="requires X-E2EE-Nonce and X-E2EE-Timestamp"):
+        with pytest.raises(E2EEHeaderMissingError, match="requires X-E2EE-Nonce and X-E2EE-Timestamp"):
             parse_e2ee_context(
                 x_signing_algo="ecdsa",
                 x_client_pub_key="11" * 64,
@@ -215,7 +219,7 @@ def test_parse_e2ee_context_v2_replay_protection():
         assert ctx.timestamp == 1700000000
         claim_e2ee_nonce(ctx)
 
-        with pytest.raises(ValueError, match="Replay detected"):
+        with pytest.raises(E2EEReplayDetectedError, match="Replay detected"):
             claim_e2ee_nonce(ctx)
 
 
@@ -229,3 +233,19 @@ def test_parse_e2ee_context_allows_ed25519():
         )
     assert ctx is not None
     assert ctx.signing_algo == "ed25519"
+
+
+def test_attestation_report_includes_signing_public_key():
+    # Test ECDSA
+    response = client.get("/v1/attestation/report?signing_algo=ecdsa", headers={"Authorization": TEST_AUTH_HEADER})
+    assert response.status_code == 200
+    data = response.json()
+    assert "signing_public_key" in data
+    assert len(data["signing_public_key"]) == 128
+
+    # Test Ed25519
+    response = client.get("/v1/attestation/report?signing_algo=ed25519", headers={"Authorization": TEST_AUTH_HEADER})
+    assert response.status_code == 200
+    data = response.json()
+    assert "signing_public_key" in data
+    assert len(data["signing_public_key"]) == 64

@@ -16,6 +16,54 @@ _ECDSA_HKDF_INFO = b"ecdsa_encryption"
 _ED25519_HKDF_INFO = b"ed25519_encryption"
 
 
+class E2EEError(ValueError):
+    """Base class for E2EE related errors."""
+
+    def __init__(self, message: str, error_type: str):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+class E2EEHeaderMissingError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_header_missing")
+
+
+class E2EEInvalidSigningAlgoError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_invalid_signing_algo")
+
+
+class E2EEInvalidPublicKeyError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_invalid_public_key")
+
+
+class E2EEModelKeyMismatchError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_model_key_mismatch")
+
+
+class E2EEInvalidVersionError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_invalid_version")
+
+
+class E2EEReplayDetectedError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_replay_detected")
+
+
+class E2EEInvalidTimestampError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_invalid_timestamp")
+
+
+class E2EEDecryptionFailedError(E2EEError):
+    def __init__(self, message: str):
+        super().__init__(message, "e2ee_decryption_failed")
+
+
 @dataclass
 class E2EEContext:
     signing_algo: str
@@ -84,10 +132,10 @@ def local_model_public_key_hex(signing_algo: str) -> str:
 
 def _validate_replay_and_timestamp(nonce: str, timestamp: int, signing_algo: str) -> None:
     if not replay_cache.validate_timestamp_window(timestamp):
-        raise ValueError("X-E2EE-Timestamp is outside allowed replay window")
+        raise E2EEInvalidTimestampError("X-E2EE-Timestamp is outside allowed replay window")
 
     if not replay_cache.claim(signing_algo=signing_algo, timestamp=timestamp, nonce=nonce):
-        raise ValueError("Replay detected: duplicated X-E2EE-Nonce/X-E2EE-Timestamp")
+        raise E2EEReplayDetectedError("Replay detected: duplicated X-E2EE-Nonce/X-E2EE-Timestamp")
 
 
 def parse_e2ee_context(
@@ -103,42 +151,42 @@ def parse_e2ee_context(
         return None
 
     if not x_signing_algo or not x_client_pub_key or not x_model_pub_key:
-        raise ValueError(
+        raise E2EEHeaderMissingError(
             "E2EE requires X-Signing-Algo, X-Client-Pub-Key, and X-Model-Pub-Key headers"
         )
 
     algo = x_signing_algo.strip().lower()
     if algo not in (ECDSA, ED25519):
-        raise ValueError("E2EE only supports X-Signing-Algo: ecdsa or ed25519")
+        raise E2EEInvalidSigningAlgoError("E2EE only supports X-Signing-Algo: ecdsa or ed25519")
 
     if not _is_hex(x_client_pub_key):
-        raise ValueError("X-Client-Pub-Key must be hex-encoded")
+        raise E2EEInvalidPublicKeyError("X-Client-Pub-Key must be hex-encoded")
     if not _is_hex(x_model_pub_key):
-        raise ValueError("X-Model-Pub-Key must be hex-encoded")
+        raise E2EEInvalidPublicKeyError("X-Model-Pub-Key must be hex-encoded")
 
     if algo == ECDSA:
         if _to_uncompressed_pubkey_bytes(x_model_pub_key) != _to_uncompressed_pubkey_bytes(
             local_model_public_key_hex(algo)
         ):
-            raise ValueError("X-Model-Pub-Key does not match this proxy instance")
+            raise E2EEModelKeyMismatchError("X-Model-Pub-Key does not match this proxy instance")
     else:
         if bytes.fromhex(x_model_pub_key) != bytes.fromhex(local_model_public_key_hex(algo)):
-            raise ValueError("X-Model-Pub-Key does not match this proxy instance")
+            raise E2EEModelKeyMismatchError("X-Model-Pub-Key does not match this proxy instance")
 
     version = (x_e2ee_version or E2EE_VERSION_V1).strip()
     if version not in (E2EE_VERSION_V1, E2EE_VERSION_V2):
-        raise ValueError("Unsupported X-E2EE-Version; supported versions are 1 and 2")
+        raise E2EEInvalidVersionError("Unsupported X-E2EE-Version; supported versions are 1 and 2")
 
     parsed_ts: int | None = None
     if version == E2EE_VERSION_V2:
         if not x_e2ee_nonce or not x_e2ee_timestamp:
-            raise ValueError("E2EE v2 requires X-E2EE-Nonce and X-E2EE-Timestamp headers")
+            raise E2EEHeaderMissingError("E2EE v2 requires X-E2EE-Nonce and X-E2EE-Timestamp headers")
         if len(x_e2ee_nonce) < 16:
-            raise ValueError("X-E2EE-Nonce must be at least 16 characters")
+            raise E2EEInvalidVersionError("X-E2EE-Nonce must be at least 16 characters")
         try:
             parsed_ts = int(x_e2ee_timestamp)
         except ValueError as exc:
-            raise ValueError("X-E2EE-Timestamp must be a unix timestamp in seconds") from exc
+            raise E2EEInvalidTimestampError("X-E2EE-Timestamp must be a unix timestamp in seconds") from exc
 
     return E2EEContext(
         signing_algo=algo,
@@ -153,7 +201,7 @@ def parse_e2ee_context(
 def claim_e2ee_nonce(e2ee_ctx: E2EEContext) -> None:
     if e2ee_ctx.version == E2EE_VERSION_V2:
         if e2ee_ctx.nonce is None or e2ee_ctx.timestamp is None:
-            raise ValueError("E2EE v2 requires nonce and timestamp for replay protection")
+            raise E2EEHeaderMissingError("E2EE v2 requires nonce and timestamp for replay protection")
         _validate_replay_and_timestamp(e2ee_ctx.nonce, e2ee_ctx.timestamp, e2ee_ctx.signing_algo)
 
 
@@ -219,7 +267,7 @@ def _ed25519_public_to_x25519_public_key(pub_hex: str) -> x25519.X25519PublicKey
     # Ed25519 public key is 32 bytes (little-endian y-coordinate with x-sign bit)
     y_bytes = bytes.fromhex(pub_hex)
     if len(y_bytes) != 32:
-        raise ValueError("Ed25519 public key must be 32 bytes")
+        raise E2EEInvalidPublicKeyError("Ed25519 public key must be 32 bytes")
     
     # RFC 7748: u = (1 + y) / (1 - y) mod p
     # y is the first 255 bits of the Ed25519 public key.
@@ -261,7 +309,7 @@ def decrypt_hex_for_model(
 
     if signing_algo == ECDSA:
         if len(encrypted_data) < 65 + 12 + 16:
-            raise ValueError("Encrypted payload is too short")
+            raise E2EEDecryptionFailedError("Encrypted payload is too short")
         ephemeral_public_bytes = encrypted_data[:65]
         nonce = encrypted_data[65:77]
         ciphertext = encrypted_data[77:]
@@ -274,7 +322,7 @@ def decrypt_hex_for_model(
 
     elif signing_algo == ED25519:
         if len(encrypted_data) < 32 + 12 + 16:
-            raise ValueError("Encrypted payload is too short")
+            raise E2EEDecryptionFailedError("Encrypted payload is too short")
         ephemeral_public_bytes = encrypted_data[:32]
         nonce = encrypted_data[32:44]
         ciphertext = encrypted_data[44:]
@@ -286,7 +334,10 @@ def decrypt_hex_for_model(
         raise ValueError("Unsupported signing algorithm")
 
     aes_key = _derive_aes_key(shared_secret, signing_algo)
-    plaintext = AESGCM(aes_key).decrypt(nonce, ciphertext, _aad_bytes(aad))
+    try:
+        plaintext = AESGCM(aes_key).decrypt(nonce, ciphertext, _aad_bytes(aad))
+    except Exception as exc:
+        raise E2EEDecryptionFailedError(f"AES-GCM decryption failed: {exc}") from exc
     return plaintext.decode("utf-8")
 
 
