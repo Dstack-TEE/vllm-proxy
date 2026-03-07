@@ -3,6 +3,7 @@ import json
 import time
 import hashlib
 import requests
+from typing import Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -81,7 +82,7 @@ def derive(shared: bytes) -> bytes:
         info=b"ed25519_encryption",
     ).derive(shared)
 
-def encrypt_prompt_ed25519(prompt: str, model_pub_hex: str, aad_req: bytes | None) -> str:
+def encrypt_prompt_ed25519(prompt: str, model_pub_hex: str, aad_req: Optional[bytes]) -> str:
     server_xpub = ed_pub_to_x25519(model_pub_hex)
     eph = x25519.X25519PrivateKey.generate()
     shared = eph.exchange(server_xpub)
@@ -94,7 +95,7 @@ def encrypt_prompt_ed25519(prompt: str, model_pub_hex: str, aad_req: bytes | Non
     )
     return (eph_pub + nonce + ct).hex()
 
-def decrypt_chunk(enc_hex: str, client_x: x25519.X25519PrivateKey, aad_resp: bytes | None) -> str:
+def decrypt_chunk(enc_hex: str, client_x: x25519.X25519PrivateKey, aad_resp: Optional[bytes]) -> str:
     blob = bytes.fromhex(enc_hex)
     if len(blob) < 32 + 12 + 16:
         raise ValueError("chunk too short")

@@ -2,6 +2,7 @@ import os
 import json
 import time
 import requests
+from typing import Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -55,7 +56,7 @@ def to_uncompressed(pub_hex: str) -> bytes:
 def derive_key(shared: bytes) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=HKDF_INFO).derive(shared)
 
-def encrypt_for_model_ecdsa(plaintext: str, model_pub_hex: str, aad_req: bytes | None) -> str:
+def encrypt_for_model_ecdsa(plaintext: str, model_pub_hex: str, aad_req: Optional[bytes]) -> str:
     model_pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), to_uncompressed(model_pub_hex))
     eph_priv = ec.generate_private_key(ec.SECP256K1())
     eph_pub = eph_priv.public_key()
@@ -69,7 +70,7 @@ def encrypt_for_model_ecdsa(plaintext: str, model_pub_hex: str, aad_req: bytes |
     )
     return (eph_pub_bytes + nonce + ct).hex()
 
-def decrypt_chunk_ecdsa(enc_hex: str, client_priv: ec.EllipticCurvePrivateKey, aad_resp: bytes | None) -> str:
+def decrypt_chunk_ecdsa(enc_hex: str, client_priv: ec.EllipticCurvePrivateKey, aad_resp: Optional[bytes]) -> str:
     blob = bytes.fromhex(enc_hex)
     if len(blob) < 65 + 12 + 16:
         raise ValueError("chunk too short")

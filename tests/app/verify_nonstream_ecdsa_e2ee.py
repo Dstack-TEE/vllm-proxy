@@ -2,6 +2,7 @@ import os
 import json
 import time
 import requests
+from typing import Optional
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -23,7 +24,7 @@ def to_uncompressed(pub_hex: str) -> bytes:
 def derive_key(shared: bytes) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=HKDF_INFO).derive(shared)
 
-def encrypt_for_model(plaintext: str, model_pub_hex: str, aad: str | None):
+def encrypt_for_model(plaintext: str, model_pub_hex: str, aad: Optional[str]):
     model_pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), to_uncompressed(model_pub_hex))
     eph_priv = ec.generate_private_key(ec.SECP256K1())
     eph_pub = eph_priv.public_key()
@@ -38,7 +39,7 @@ def encrypt_for_model(plaintext: str, model_pub_hex: str, aad: str | None):
     )
     return (eph_pub_bytes + nonce + ct).hex()
 
-def decrypt_from_model(enc_hex: str, client_priv, aad: str | None):
+def decrypt_from_model(enc_hex: str, client_priv, aad: Optional[str]):
     blob = bytes.fromhex(enc_hex)
     eph_pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), blob[:65])
     nonce = blob[65:77]
