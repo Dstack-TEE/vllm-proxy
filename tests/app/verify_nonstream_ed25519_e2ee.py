@@ -45,6 +45,111 @@ def derive(shared: bytes) -> bytes:
         info=b"ed25519_encryption",
     ).derive(shared)
 
+def test_v1(model_pub_hex, client_x, client_pub_hex):
+    print("--- Testing E2EE v1 (Legacy) ---")
+    prompt = "please only reply: E2EE_V1_OK"
+    server_xpub = ed_pub_to_x25519(model_pub_hex)
+    eph = x25519.X25519PrivateKey.generate()
+    shared = eph.exchange(server_xpub)
+    key = derive(shared)
+    nonce = os.urandom(12)
+    # No AAD for v1
+    ct = AESGCM(key).encrypt(nonce, prompt.encode("utf-8"), None)
+    eph_pub = eph.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    enc_prompt_hex = (eph_pub + nonce + ct).hex()
+    
+    payload = {
+        "model": MODEL_NAME,
+        "stream": False,
+        "messages": [{"role": "user", "content": enc_prompt_hex}],
+    }
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "X-Signing-Algo": "ed25519",
+        "X-Client-Pub-Key": client_pub_hex,
+        "X-Model-Pub-Key": model_pub_hex,
+    }
+    
+    r = requests.post(f"{BASE_URL}/v1/chat/completions", headers=headers, json=payload, timeout=120)
+    print("v1 status:", r.status_code)
+    r.raise_for_status()
+    data = r.json()
+    
+    enc_resp = data["choices"][0]["message"]["content"]
+    blob = bytes.fromhex(enc_resp)
+    eph2 = x25519.X25519PublicKey.from_public_bytes(blob[:32])
+    nonce2 = blob[32:44]
+    ct2 = blob[44:]
+    shared2 = client_x.exchange(eph2)
+    key2 = derive(shared2)
+    # No AAD for v1
+    plain = AESGCM(key2).decrypt(nonce2, ct2, None).decode("utf-8")
+    print("v1 decrypted:", plain)
+    
+    clean_text = plain.replace("_", "").replace(" ", "").replace("\n", "").upper()
+    if "V1OK" not in clean_text:
+        raise AssertionError(f"v1 failed: {plain}")
+    print("[OK] v1 pass")
+
+def test_v2(model_pub_hex, client_x, client_pub_hex):
+    print("--- Testing E2EE v2 (Strict) ---")
+    nonce_hdr = "n" + str(int(time.time())) + "abcd1234abcd"
+    ts_hdr = str(int(time.time()))
+    prompt = "please only reply: E2EE_V2_OK"
+    
+    server_xpub = ed_pub_to_x25519(model_pub_hex)
+    eph = x25519.X25519PrivateKey.generate()
+    shared = eph.exchange(server_xpub)
+    key = derive(shared)
+    aad_req = f"v2|req|algo=ed25519|model={MODEL_NAME}|m=0|c=-|n={nonce_hdr}|ts={ts_hdr}".encode()
+    nonce = os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, prompt.encode("utf-8"), aad_req)
+    eph_pub = eph.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    enc_prompt_hex = (eph_pub + nonce + ct).hex()
+    
+    payload = {
+        "model": MODEL_NAME,
+        "stream": False,
+        "messages": [{"role": "user", "content": enc_prompt_hex}],
+    }
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "X-Signing-Algo": "ed25519",
+        "X-Client-Pub-Key": client_pub_hex,
+        "X-Model-Pub-Key": model_pub_hex,
+        "X-E2EE-Nonce": nonce_hdr,
+        "X-E2EE-Timestamp": ts_hdr,
+    }
+    
+    r = requests.post(f"{BASE_URL}/v1/chat/completions", headers=headers, json=payload, timeout=120)
+    print("v2 status:", r.status_code)
+    r.raise_for_status()
+    data = r.json()
+    
+    enc_resp = data["choices"][0]["message"]["content"]
+    blob = bytes.fromhex(enc_resp)
+    eph2 = x25519.X25519PublicKey.from_public_bytes(blob[:32])
+    nonce2 = blob[32:44]
+    ct2 = blob[44:]
+    shared2 = client_x.exchange(eph2)
+    key2 = derive(shared2)
+    aad_resp = f"v2|resp|algo=ed25519|model={data.get('model','')}|id={data.get('id','')}|choice=0|field=content|n={nonce_hdr}|ts={ts_hdr}".encode()
+    plain = AESGCM(key2).decrypt(nonce2, ct2, aad_resp).decode("utf-8")
+    print("v2 decrypted:", plain)
+    
+    clean_text = plain.replace("_", "").replace(" ", "").replace("\n", "").upper()
+    if "V2OK" not in clean_text:
+        raise AssertionError(f"v2 failed: {plain}")
+    print("[OK] v2 pass")
+
 def main():
     # 1) get server ed25519 pubkey
     att = requests.get(
@@ -64,69 +169,10 @@ def main():
     ).hex()
     client_x = ed_priv_to_x25519(client_ed)
 
-    # 3) encrypt request
-    nonce_hdr = "n" + str(int(time.time())) + "abcd1234abcd"
-    ts_hdr = str(int(time.time()))
-    prompt = "please only reply: E2EE_ED25519_OK"
-
-    server_xpub = ed_pub_to_x25519(model_pub_hex)
-    eph = x25519.X25519PrivateKey.generate()
-    shared = eph.exchange(server_xpub)
-    key = derive(shared)
-    aad_req = f"v2|req|algo=ed25519|model={MODEL_NAME}|m=0|c=-|n={nonce_hdr}|ts={ts_hdr}".encode()
-    nonce = os.urandom(12)
-    ct = AESGCM(key).encrypt(nonce, prompt.encode("utf-8"), aad_req)
-    eph_pub = eph.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    enc_prompt_hex = (eph_pub + nonce + ct).hex()
-
-    payload = {
-        "model": MODEL_NAME,
-        "stream": False,
-        "messages": [{"role": "user", "content": enc_prompt_hex}],
-    }
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "X-Signing-Algo": "ed25519",
-        "X-Client-Pub-Key": client_pub_hex,
-        "X-Model-Pub-Key": model_pub_hex,
-        "X-E2EE-Version": "2",
-        "X-E2EE-Nonce": nonce_hdr,
-        "X-E2EE-Timestamp": ts_hdr,
-    }
-
-    # 4) first request
-    r = requests.post(f"{BASE_URL}/v1/chat/completions", headers=headers, data=json.dumps(payload), timeout=120)
-    print("first status:", r.status_code)
-    print("e2ee headers:", {k: v for k, v in r.headers.items() if k.lower().startswith("x-e2ee")})
-    print("body prefix:", r.text[:180])
-    r.raise_for_status()
-    data = r.json()
-
-    # 5) decrypt response
-    enc_resp = data["choices"][0]["message"]["content"]
-    blob = bytes.fromhex(enc_resp)
-    eph2 = x25519.X25519PublicKey.from_public_bytes(blob[:32])
-    nonce2 = blob[32:44]
-    ct2 = blob[44:]
-    shared2 = client_x.exchange(eph2)
-    key2 = derive(shared2)
-    aad_resp = f"v2|resp|algo=ed25519|model={data.get('model','')}|id={data.get('id','')}|choice=0|field=content|n={nonce_hdr}|ts={ts_hdr}".encode()
-    plain = AESGCM(key2).decrypt(nonce2, ct2, aad_resp).decode("utf-8")
-    print("decrypted response:", plain)
-
-    clean_text = plain.replace("_", "").replace(" ", "").replace("\n", "").upper()
-    if "E2EEED25519OK" not in clean_text:
-        raise AssertionError(f"decrypted text '{plain}' does not contain expected marker")
-    print("[OK] non-stream decrypt assertion passed")
-
-    # 6) replay test
-    r2 = requests.post(f"{BASE_URL}/v1/chat/completions", headers=headers, data=json.dumps(payload), timeout=120)
-    print("replay status(expect 400):", r2.status_code)
-    print("replay body:", r2.text[:160])
+    # 3) run tests
+    test_v1(model_pub_hex, client_x, client_pub_hex)
+    print()
+    test_v2(model_pub_hex, client_x, client_pub_hex)
 
 if __name__ == "__main__":
     main()

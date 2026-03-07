@@ -234,6 +234,47 @@ def test_parse_e2ee_context_v2_replay_protection():
             claim_e2ee_nonce(ctx)
 
 
+def test_parse_e2ee_context_implicit_v2_when_nonce_and_timestamp_present():
+    with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value="22" * 64):
+        ctx = parse_e2ee_context(
+            x_signing_algo="ecdsa",
+            x_client_pub_key="11" * 64,
+            x_model_pub_key="22" * 64,
+            x_e2ee_version=None,
+            x_e2ee_nonce="abcd1234abcd1234",
+            x_e2ee_timestamp="1700000000",
+        )
+    assert ctx.version == "2"
+    assert ctx.timestamp == 1700000000
+
+
+def test_parse_e2ee_context_legacy_mode_when_nonce_and_timestamp_absent():
+    with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value="22" * 64):
+        ctx = parse_e2ee_context(
+            x_signing_algo="ecdsa",
+            x_client_pub_key="11" * 64,
+            x_model_pub_key="22" * 64,
+            x_e2ee_version=None,
+            x_e2ee_nonce=None,
+            x_e2ee_timestamp=None,
+        )
+    assert ctx.version == "1"
+    assert ctx.timestamp is None
+
+
+def test_parse_e2ee_context_rejects_partial_nonce_timestamp_pair():
+    with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value="22" * 64):
+        with pytest.raises(E2EEHeaderMissingError, match="must be provided together"):
+            parse_e2ee_context(
+                x_signing_algo="ecdsa",
+                x_client_pub_key="11" * 64,
+                x_model_pub_key="22" * 64,
+                x_e2ee_version=None,
+                x_e2ee_nonce="abcd1234abcd1234",
+                x_e2ee_timestamp=None,
+            )
+
+
 def test_parse_e2ee_context_allows_ed25519():
     pub = "33" * 32
     with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value=pub):

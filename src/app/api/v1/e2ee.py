@@ -178,9 +178,23 @@ def parse_e2ee_context(
         if bytes.fromhex(x_model_pub_key) != bytes.fromhex(local_model_public_key_hex(algo)):
             raise E2EEModelKeyMismatchError("X-Model-Pub-Key does not match this proxy instance")
 
-    version = (x_e2ee_version or E2EE_VERSION_V1).strip()
-    if version not in (E2EE_VERSION_V1, E2EE_VERSION_V2):
+    version_header = (x_e2ee_version or "").strip()
+    if version_header and version_header not in (E2EE_VERSION_V1, E2EE_VERSION_V2):
         raise E2EEInvalidVersionError("Unsupported X-E2EE-Version; supported versions are 1 and 2")
+
+    has_nonce = bool(x_e2ee_nonce)
+    has_timestamp = bool(x_e2ee_timestamp)
+    if has_nonce ^ has_timestamp:
+        raise E2EEHeaderMissingError(
+            "X-E2EE-Nonce and X-E2EE-Timestamp must be provided together"
+        )
+
+    # Compatibility mode selection:
+    # - explicit v2 header -> strict v2
+    # - nonce+timestamp present -> strict v2 (implicit)
+    # - otherwise -> legacy mode (near-compatible semantics)
+    use_v2 = (version_header == E2EE_VERSION_V2) or (has_nonce and has_timestamp)
+    version = E2EE_VERSION_V2 if use_v2 else E2EE_VERSION_V1
 
     parsed_ts: int | None = None
     if version == E2EE_VERSION_V2:

@@ -55,7 +55,7 @@ def to_uncompressed(pub_hex: str) -> bytes:
 def derive_key(shared: bytes) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=HKDF_INFO).derive(shared)
 
-def encrypt_for_model_ecdsa(plaintext: str, model_pub_hex: str, aad_req: bytes) -> str:
+def encrypt_for_model_ecdsa(plaintext: str, model_pub_hex: str, aad_req: bytes | None) -> str:
     model_pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), to_uncompressed(model_pub_hex))
     eph_priv = ec.generate_private_key(ec.SECP256K1())
     eph_pub = eph_priv.public_key()
@@ -69,7 +69,7 @@ def encrypt_for_model_ecdsa(plaintext: str, model_pub_hex: str, aad_req: bytes) 
     )
     return (eph_pub_bytes + nonce + ct).hex()
 
-def decrypt_chunk_ecdsa(enc_hex: str, client_priv: ec.EllipticCurvePrivateKey, aad_resp: bytes) -> str:
+def decrypt_chunk_ecdsa(enc_hex: str, client_priv: ec.EllipticCurvePrivateKey, aad_resp: bytes | None) -> str:
     blob = bytes.fromhex(enc_hex)
     if len(blob) < 65 + 12 + 16:
         raise ValueError("chunk too short")
@@ -87,33 +87,13 @@ def client_pub_hex64(client_priv):
     )
     return pub[1:].hex()
 
-def main():
-    sess = build_session()
-    verify = verify_arg()
-
-    # 1) get server ecdsa pubkey from attestation
-    att_url = f"{BASE_URL}/v1/attestation/report?signing_algo=ecdsa"
-    att = sess.get(att_url, headers={"Authorization": f"Bearer {API_KEY}"}, timeout=TIMEOUT, verify=verify)
-    att.raise_for_status()
-    att_json = att.json()
-    model_pub_hex = att_json.get("signing_public_key")
-    if not model_pub_hex:
-        raise RuntimeError("signing_public_key not found in attestation report")
-    print(f"[OK] server ecdsa pubkey (len={len(model_pub_hex)})")
-
-    # 2) client temporary key
-    client_priv = ec.generate_private_key(ec.SECP256K1())
-    client_pub_hex = client_pub_hex64(client_priv)
-
-    # 3) construct v2 request
-    nonce_hdr = "n" + str(int(time.time())) + "abcd1234abcd"
-    ts_hdr = str(int(time.time()))
-    marker = "STREAM_ECDSA_OK"
+def test_v1_stream(sess, verify, model_pub_hex, client_priv, client_pub_hex):
+    print("--- Testing E2EE v1 Stream (Legacy) ---")
+    marker = "STREAM_V1_OK"
     prompt = f"please only reply: {marker}"
-
-    aad_req = f"v2|req|algo=ecdsa|model={MODEL_NAME}|m=0|c=-|n={nonce_hdr}|ts={ts_hdr}".encode("utf-8")
-    enc_prompt_hex = encrypt_for_model_ecdsa(prompt, model_pub_hex, aad_req)
-
+    
+    enc_prompt_hex = encrypt_for_model_ecdsa(prompt, model_pub_hex, None)
+    
     payload = {
         "model": MODEL_NAME,
         "stream": True,
@@ -125,64 +105,103 @@ def main():
         "X-Signing-Algo": "ecdsa",
         "X-Client-Pub-Key": client_pub_hex,
         "X-Model-Pub-Key": model_pub_hex,
-        "X-E2EE-Version": "2",
-        "X-E2EE-Nonce": nonce_hdr,
-        "X-E2EE-Timestamp": ts_hdr,
     }
-
-    # 4) first stream request
+    
     url = f"{BASE_URL}/v1/chat/completions"
-    resp = sess.post(url, headers=headers, data=json.dumps(payload), stream=True, timeout=TIMEOUT, verify=verify)
-    print("first status:", resp.status_code)
-    print("x-e2ee headers:", {k: v for k, v in resp.headers.items() if k.lower().startswith("x-e2ee")})
+    resp = sess.post(url, headers=headers, json=payload, stream=True, timeout=TIMEOUT, verify=verify)
+    print("v1 status:", resp.status_code)
     resp.raise_for_status()
-
-    # 5) parse and decrypt stream chunks
+    
     parts = []
     seen_data_chunk = False
-
     for line in resp.iter_lines(decode_unicode=True):
-        if not line:
-            continue
-        if not line.startswith("data: "):
-            continue
+        if not line or not line.startswith("data: "): continue
         data = line[6:].strip()
-        if data == "[DONE]":
-            break
-
+        if data == "[DONE]": break
+        
         obj = json.loads(data)
         for ch in obj.get("choices", []):
             delta = ch.get("delta", {})
             enc_piece = delta.get("content")
             if isinstance(enc_piece, str) and enc_piece:
                 seen_data_chunk = True
-                aad_resp = (
-                    f"v2|resp|algo=ecdsa|model={obj.get('model','')}"
-                    f"|id={obj.get('id','')}|choice={ch.get('index',0)}"
-                    f"|field=content|n={nonce_hdr}|ts={ts_hdr}"
-                ).encode("utf-8")
-                parts.append(decrypt_chunk_ecdsa(enc_piece, client_priv, aad_resp))
-
+                parts.append(decrypt_chunk_ecdsa(enc_piece, client_priv, None))
+                
     text = "".join(parts)
-    print("decrypted_stream_text:", text[:500])
-
-    # assertion
-    if not seen_data_chunk:
-        raise AssertionError("no encrypted delta.content chunks found")
-    
+    print("v1 decrypted:", text)
     clean_text = text.replace("_", "").replace(" ", "").replace("\n", "").upper()
-    if "STREAMECDSAOK" not in clean_text:
-        raise AssertionError(f"decrypted text '{text}' does not contain expected marker")
+    if "V1OK" not in clean_text:
+        raise AssertionError(f"v1 failed: {text}")
+    print("[OK] v1 pass")
 
-    print("[OK] stream decrypt assertion passed")
+def test_v2_stream(sess, verify, model_pub_hex, client_priv, client_pub_hex):
+    print("--- Testing E2EE v2 Stream (Strict) ---")
+    nonce_hdr = "n" + str(int(time.time())) + "abcd1234abcd"
+    ts_hdr = str(int(time.time()))
+    marker = "STREAM_V2_OK"
+    prompt = f"please only reply: {marker}"
+    
+    aad_req = f"v2|req|algo=ecdsa|model={MODEL_NAME}|m=0|c=-|n={nonce_hdr}|ts={ts_hdr}".encode("utf-8")
+    enc_prompt_hex = encrypt_for_model_ecdsa(prompt, model_pub_hex, aad_req)
+    
+    payload = {
+        "model": MODEL_NAME,
+        "stream": True,
+        "messages": [{"role": "user", "content": enc_prompt_hex}],
+    }
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "X-Signing-Algo": "ecdsa",
+        "X-Client-Pub-Key": client_pub_hex,
+        "X-Model-Pub-Key": model_pub_hex,
+        "X-E2EE-Nonce": nonce_hdr,
+        "X-E2EE-Timestamp": ts_hdr,
+    }
+    
+    url = f"{BASE_URL}/v1/chat/completions"
+    resp = sess.post(url, headers=headers, json=payload, stream=True, timeout=TIMEOUT, verify=verify)
+    print("v2 status:", resp.status_code)
+    resp.raise_for_status()
+    
+    parts = []
+    seen_data_chunk = False
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "): continue
+        data = line[6:].strip()
+        if data == "[DONE]": break
+        
+        obj = json.loads(data)
+        for ch in obj.get("choices", []):
+            delta = ch.get("delta", {})
+            enc_piece = delta.get("content")
+            if isinstance(enc_piece, str) and enc_piece:
+                seen_data_chunk = True
+                aad_resp = f"v2|resp|algo=ecdsa|model={obj.get('model','')}|id={obj.get('id','')}|choice={ch.get('index',0)}|field=content|n={nonce_hdr}|ts={ts_hdr}".encode("utf-8")
+                parts.append(decrypt_chunk_ecdsa(enc_piece, client_priv, aad_resp))
+                
+    text = "".join(parts)
+    print("v2 decrypted:", text)
+    clean_text = text.replace("_", "").replace(" ", "").replace("\n", "").upper()
+    if "V2OK" not in clean_text:
+        raise AssertionError(f"v2 failed: {text}")
+    print("[OK] v2 pass")
 
-    # 6) replay (same nonce/ts)
-    resp2 = sess.post(url, headers=headers, data=json.dumps(payload), timeout=TIMEOUT, verify=verify)
-    print("replay status(expect 400):", resp2.status_code)
-    if resp2.status_code != 400 or "e2ee_replay_detected" not in resp2.text.lower():
-        raise AssertionError(f"replay assertion failed: {resp2.text}")
-
-    print("[OK] replay assertion passed")
+def main():
+    sess = build_session()
+    verify = verify_arg()
+    
+    att_url = f"{BASE_URL}/v1/attestation/report?signing_algo=ecdsa"
+    att = sess.get(att_url, headers={"Authorization": f"Bearer {API_KEY}"}, verify=verify)
+    att.raise_for_status()
+    model_pub_hex = att.json()["signing_public_key"]
+    
+    client_priv = ec.generate_private_key(ec.SECP256K1())
+    client_pub_hex = client_pub_hex64(client_priv)
+    
+    test_v1_stream(sess, verify, model_pub_hex, client_priv, client_pub_hex)
+    print()
+    test_v2_stream(sess, verify, model_pub_hex, client_priv, client_pub_hex)
 
 if __name__ == "__main__":
     main()

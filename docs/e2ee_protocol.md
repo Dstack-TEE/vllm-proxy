@@ -37,13 +37,20 @@ For each encryption operation, the client generates an ephemeral key pair of the
 ## 3. Request Encryption (v2)
 
 ### 3.1 Headers
-The following headers are required for E2EE v2:
+The following headers are used for E2EE:
 - `X-Signing-Algo`: `ecdsa` or `ed25519`
 - `X-Client-Pub-Key`: Client's public key (Hex)
 - `X-Model-Pub-Key`: Server's public key (Hex)
-- `X-E2EE-Version`: `2`
+
+Strict v2 mode is activated when either:
+- `X-E2EE-Version: 2` is provided, or
+- both `X-E2EE-Nonce` and `X-E2EE-Timestamp` are provided.
+
+In strict v2 mode:
 - `X-E2EE-Nonce`: Minimum 16-character unique string per request.
 - `X-E2EE-Timestamp`: Unix timestamp (seconds).
+
+If nonce/timestamp are omitted and v2 is not explicitly requested, the server uses legacy (near-compatible) E2EE behavior.
 
 ### 3.2 AAD Construction (v2 Request)
 Format: `v2|req|algo={algo}|model={model}|m={message_index}|c={content_index}|n={nonce}|ts={timestamp}`
