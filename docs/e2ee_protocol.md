@@ -5,8 +5,8 @@ This document defines the End-to-End Encryption (E2EE) protocol used by the Phal
 ## 1. Overview
 
 The protocol supports two major versions:
-- **v1**: Basic E2EE (Deprecated, not recommended for new implementations).
-- **v2**: Enhanced E2EE with AAD (Additional Authenticated Data) and Replay Protection.
+- **v1**: Legacy compatibility mode (kept for backward compatibility and Near-compatible integrations).
+- **v2**: Enhanced E2EE with AAD (Additional Authenticated Data) and Replay Protection (**recommended** for security-sensitive deployments).
 
 Supported Algorithms:
 - **ECDSA**: Using `secp256k1` curve for signing and ECDH key exchange.
@@ -36,21 +36,30 @@ For each encryption operation, the client generates an ephemeral key pair of the
 
 ## 3. Request Encryption (v2)
 
-### 3.1 Headers
+### 3.1 Headers and Version Selection
+
 The following headers are used for E2EE:
 - `X-Signing-Algo`: `ecdsa` or `ed25519`
 - `X-Client-Pub-Key`: Client's public key (Hex)
 - `X-Model-Pub-Key`: Server's public key (Hex)
 
-Strict v2 mode is activated when either:
+Version selection rules:
+
+1. **Strict v2 mode** is used when:
 - `X-E2EE-Version: 2` is provided, or
 - both `X-E2EE-Nonce` and `X-E2EE-Timestamp` are provided.
+
+2. **Legacy v1 mode** is used when:
+- E2EE key headers are provided, but v2 conditions are not met
+- (e.g. no nonce/timestamp and no explicit `X-E2EE-Version: 2`).
+
+3. **Plain (non-E2EE) mode** is used when:
+- E2EE key headers are not provided.
 
 In strict v2 mode:
 - `X-E2EE-Nonce`: Minimum 16-character unique string per request.
 - `X-E2EE-Timestamp`: Unix timestamp (seconds).
-
-If nonce/timestamp are omitted and v2 is not explicitly requested, the server uses legacy (near-compatible) E2EE behavior.
+- `X-E2EE-Nonce` and `X-E2EE-Timestamp` must be provided together.
 
 ### 3.2 AAD Construction (v2 Request)
 Format: `v2|req|algo={algo}|model={model}|m={message_index}|c={content_index}|n={nonce}|ts={timestamp}`
@@ -67,10 +76,14 @@ The result is Hex-encoded.
 ## 4. Response Encryption (v2)
 
 ### 4.1 Response Headers
-The server returns:
+
+When E2EE is applied, the server returns:
 - `X-E2EE-Applied`: `true`
-- `X-E2EE-Version`: `2`
-- `X-E2EE-Alg`: Same as requested.
+- `X-E2EE-Version`: negotiated version (`1` or `2`)
+- `X-E2EE-Alg`: same as requested (`ecdsa` or `ed25519`)
+
+When E2EE is not applied, the server returns:
+- `X-E2EE-Applied`: `false`
 
 ### 4.2 AAD Construction (v2 Response)
 Format: `v2|resp|algo={algo}|model={model}|id={obj_id}|choice={choice_index}|field={field_name}|n={nonce}|ts={timestamp}`
@@ -92,3 +105,11 @@ Format: `v2|resp|algo={algo}|model={model}|id={obj_id}|choice={choice_index}|fie
 | `e2ee_replay_detected` | Nonce + Timestamp has already been consumed. |
 | `e2ee_invalid_timestamp` | Timestamp is malformed or outside the allowed window. |
 | `e2ee_decryption_failed` | MAC tag mismatch or invalid ciphertext format. |
+
+
+## 6. Compatibility Note
+
+This implementation supports a legacy E2EE behavior for Near-compatible clients and a strict v2 behavior for enhanced security.
+
+- Use **v2** (`X-E2EE-Version: 2` or nonce+timestamp) for AAD binding and replay protection.
+- Use **legacy/v1** only when interoperability with existing clients requires it.
