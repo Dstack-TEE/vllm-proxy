@@ -63,6 +63,22 @@ class RedisCache:
             self._open_circuit()
             return False
 
+    def set_if_absent(self, key: str, value: str, expiration: Optional[int] = None) -> bool:
+        """
+        Set key only if it does not exist (SET NX EX).
+        Returns True when inserted, False when key already exists or on failure.
+        """
+        if self._is_circuit_open():
+            return False
+
+        ex = self.expiration if expiration is None else expiration
+        try:
+            inserted = self.redis_client.set(key, value, nx=True, ex=ex)
+            return bool(inserted)
+        except redis.RedisError:
+            self._open_circuit()
+            return False
+
     def get_string(self, key: str) -> Optional[str]:
         """
         Retrieve chat data from Redis
