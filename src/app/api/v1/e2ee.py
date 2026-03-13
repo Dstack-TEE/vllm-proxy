@@ -505,6 +505,8 @@ def encrypt_chat_completion_chunk(
 
     for choice_index, choice in enumerate(chunk_data.get("choices", [])):
         delta = choice.get("delta") or {}
+        if delta.get("content", None) == "":
+            del delta["content"]
         _encrypt_field(
             delta,
             "content",
