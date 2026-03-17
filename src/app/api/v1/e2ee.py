@@ -1,5 +1,6 @@
 import os
 import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 from cryptography.hazmat.primitives import hashes, serialization
@@ -407,7 +408,19 @@ def _decrypt_content_value(
         if not _is_hex(content):
             raise ValueError("Encrypted message content must be hex-encoded")
         aad = _build_request_aad(payload, message_index, None, e2ee_ctx)
-        return decrypt_hex_for_model(content, e2ee_ctx.signing_algo, aad)
+        decrypted_content = decrypt_hex_for_model(content, e2ee_ctx.signing_algo, aad)
+
+        # Compatibility path: some clients encrypt a JSON-stringified multimodal
+        # content array as a single encrypted string. If it decodes to a list,
+        # restore it to structured content for downstream vLLM.
+        try:
+            parsed = json.loads(decrypted_content)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        return decrypted_content
 
     if isinstance(content, list):
         new_content: list[Any] = []
