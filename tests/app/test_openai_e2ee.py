@@ -190,6 +190,35 @@ def test_decrypt_request_json_does_not_mutate_input_payload():
     assert out["messages"][0]["content"] == "plain"
 
 
+def test_decrypt_request_json_supports_stringified_multimodal_content_array():
+    payload = {
+        "messages": [{"role": "user", "content": "aa" * 40}],
+    }
+    decrypted_multimodal = '[{"type":"text","text":"hello"},{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}]'
+
+    with patch("app.api.v1.e2ee.decrypt_hex_for_model", return_value=decrypted_multimodal):
+        out = decrypt_request_json(
+            payload, E2EEContext("ecdsa", "11" * 64, "22" * 64, "1", None, None)
+        )
+
+    assert isinstance(out["messages"][0]["content"], list)
+    assert out["messages"][0]["content"][0]["type"] == "text"
+    assert out["messages"][0]["content"][1]["type"] == "image_url"
+
+
+def test_decrypt_request_json_keeps_non_list_json_string_as_plain_text():
+    payload = {
+        "messages": [{"role": "user", "content": "aa" * 40}],
+    }
+
+    with patch("app.api.v1.e2ee.decrypt_hex_for_model", return_value='{"foo":"bar"}'):
+        out = decrypt_request_json(
+            payload, E2EEContext("ecdsa", "11" * 64, "22" * 64, "1", None, None)
+        )
+
+    assert out["messages"][0]["content"] == '{"foo":"bar"}'
+
+
 def test_parse_e2ee_context_v2_requires_nonce_and_timestamp():
     with patch("app.api.v1.e2ee.local_model_public_key_hex", return_value="22" * 64):
         with pytest.raises(E2EEHeaderMissingError, match="requires X-E2EE-Nonce and X-E2EE-Timestamp"):
