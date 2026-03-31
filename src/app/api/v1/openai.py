@@ -48,6 +48,13 @@ VLLM_URL = f"{VLLM_BASE_URL}/v1/chat/completions"
 VLLM_COMPLETIONS_URL = f"{VLLM_BASE_URL}/v1/completions"
 VLLM_METRICS_URL = f"{VLLM_BASE_URL}/metrics"
 VLLM_MODELS_URL = f"{VLLM_BASE_URL}/v1/models"
+
+CHUTES_ENABLED = os.getenv("CHUTES_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+CHUTES_BASE_URL = os.getenv("CHUTES_BASE_URL", "https://llm.chutes.ai").rstrip("/")
+CHUTES_CHAT_COMPLETIONS_URL = f"{CHUTES_BASE_URL}/v1/chat/completions"
+CHUTES_MODELS_URL = f"{CHUTES_BASE_URL}/v1/models"
+CHUTES_API_KEY = os.getenv("CHUTES_API_KEY")
+
 TIMEOUT = 60 * 10
 
 COMMON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -72,15 +79,29 @@ def sign_chat(text: str):
     )
 
 
+def _with_outbound_headers(outbound_headers: Optional[dict[str, str]] = None) -> dict[str, str]:
+    headers = dict(COMMON_HEADERS)
+    if outbound_headers:
+        headers.update(outbound_headers)
+    return headers
+
+
+def _chutes_auth_headers() -> dict[str, str]:
+    if CHUTES_API_KEY:
+        return {"Authorization": f"Bearer {CHUTES_API_KEY}"}
+    return {}
+
+
 async def stream_vllm_response(
     url: str,
     request_body: bytes,
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
     e2ee_ctx=None,
+    outbound_headers: Optional[dict[str, str]] = None,
 ):
     """
-    Handle streaming vllm request
+    Handle streaming backend request.
     Args:
         request_body: The original request body
         modified_request_body: The modified enhanced request body
@@ -137,8 +158,10 @@ async def stream_vllm_response(
             log.error(error_message)
             raise Exception(error_message)
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT), headers=COMMON_HEADERS)
-    # Forward the request to the vllm backend
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(TIMEOUT),
+        headers=_with_outbound_headers(outbound_headers),
+    )
     req = client.build_request("POST", url, content=modified_request_body)
     response = await client.send(req, stream=True)
     # If not 200, return the error response directly without streaming
@@ -171,6 +194,7 @@ async def non_stream_vllm_response(
     modified_request_body: bytes,
     request_hash: Optional[str] = None,
     e2ee_ctx=None,
+    outbound_headers: Optional[dict[str, str]] = None,
 ):
     """
     Handle non-streaming responses
@@ -191,7 +215,8 @@ async def non_stream_vllm_response(
         log.debug(f"Calculated request hash: {request_sha256}")
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(TIMEOUT), headers=COMMON_HEADERS
+        timeout=httpx.Timeout(TIMEOUT),
+        headers=_with_outbound_headers(outbound_headers),
     ) as client:
         response = await client.post(url, content=modified_request_body)
         if response.status_code != 200:
@@ -263,17 +288,17 @@ async def attestation_report(
     return resp
 
 
-# VLLM Chat completions
-@router.post("/chat/completions", dependencies=[Depends(verify_authorization_header)])
-async def chat_completions(
+async def _chat_completions_impl(
     request: Request,
-    x_request_hash: Optional[str] = Header(None, alias="X-Request-Hash"),
-    x_signing_algo: Optional[str] = Header(None, alias="X-Signing-Algo"),
-    x_client_pub_key: Optional[str] = Header(None, alias="X-Client-Pub-Key"),
-    x_model_pub_key: Optional[str] = Header(None, alias="X-Model-Pub-Key"),
-    x_e2ee_version: Optional[str] = Header(None, alias="X-E2EE-Version"),
-    x_e2ee_nonce: Optional[str] = Header(None, alias="X-E2EE-Nonce"),
-    x_e2ee_timestamp: Optional[str] = Header(None, alias="X-E2EE-Timestamp"),
+    x_request_hash: Optional[str],
+    x_signing_algo: Optional[str],
+    x_client_pub_key: Optional[str],
+    x_model_pub_key: Optional[str],
+    x_e2ee_version: Optional[str],
+    x_e2ee_nonce: Optional[str],
+    x_e2ee_timestamp: Optional[str],
+    backend_url: str,
+    outbound_headers: Optional[dict[str, str]] = None,
 ):
     # Keep original request body to calculate the request hash for attestation
     request_body = await request.body()
@@ -299,24 +324,88 @@ async def chat_completions(
     modified_json = strip_empty_tool_calls(request_json)
 
     # Check if the request is for streaming or non-streaming
-    is_stream = modified_json.get(
-        "stream", False
-    )  # Default to non-streaming if not specified
+    is_stream = modified_json.get("stream", False)
     modified_request_body = json.dumps(modified_json).encode("utf-8")
+
     if is_stream:
-        # Create a streaming response
         return await stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash, e2ee_ctx
+            backend_url,
+            request_body,
+            modified_request_body,
+            x_request_hash,
+            e2ee_ctx,
+            outbound_headers=outbound_headers,
         )
-    else:
-        # Handle non-streaming response
-        response_data = await non_stream_vllm_response(
-            VLLM_URL, request_body, modified_request_body, x_request_hash, e2ee_ctx
-        )
-        return JSONResponse(
-            content=response_data,
-            headers=get_e2ee_response_headers(e2ee_ctx),
-        )
+
+    response_data = await non_stream_vllm_response(
+        backend_url,
+        request_body,
+        modified_request_body,
+        x_request_hash,
+        e2ee_ctx,
+        outbound_headers=outbound_headers,
+    )
+    return JSONResponse(
+        content=response_data,
+        headers=get_e2ee_response_headers(e2ee_ctx),
+    )
+
+
+# VLLM Chat completions (existing path, unchanged behavior)
+@router.post("/chat/completions", dependencies=[Depends(verify_authorization_header)])
+async def chat_completions(
+    request: Request,
+    x_request_hash: Optional[str] = Header(None, alias="X-Request-Hash"),
+    x_signing_algo: Optional[str] = Header(None, alias="X-Signing-Algo"),
+    x_client_pub_key: Optional[str] = Header(None, alias="X-Client-Pub-Key"),
+    x_model_pub_key: Optional[str] = Header(None, alias="X-Model-Pub-Key"),
+    x_e2ee_version: Optional[str] = Header(None, alias="X-E2EE-Version"),
+    x_e2ee_nonce: Optional[str] = Header(None, alias="X-E2EE-Nonce"),
+    x_e2ee_timestamp: Optional[str] = Header(None, alias="X-E2EE-Timestamp"),
+):
+    return await _chat_completions_impl(
+        request=request,
+        x_request_hash=x_request_hash,
+        x_signing_algo=x_signing_algo,
+        x_client_pub_key=x_client_pub_key,
+        x_model_pub_key=x_model_pub_key,
+        x_e2ee_version=x_e2ee_version,
+        x_e2ee_nonce=x_e2ee_nonce,
+        x_e2ee_timestamp=x_e2ee_timestamp,
+        backend_url=VLLM_URL,
+    )
+
+
+# Chutes chat completions (new path, side-by-side with existing logic)
+@router.post("/chutes/chat/completions", dependencies=[Depends(verify_authorization_header)])
+async def chutes_chat_completions(
+    request: Request,
+    x_request_hash: Optional[str] = Header(None, alias="X-Request-Hash"),
+    x_signing_algo: Optional[str] = Header(None, alias="X-Signing-Algo"),
+    x_client_pub_key: Optional[str] = Header(None, alias="X-Client-Pub-Key"),
+    x_model_pub_key: Optional[str] = Header(None, alias="X-Model-Pub-Key"),
+    x_e2ee_version: Optional[str] = Header(None, alias="X-E2EE-Version"),
+    x_e2ee_nonce: Optional[str] = Header(None, alias="X-E2EE-Nonce"),
+    x_e2ee_timestamp: Optional[str] = Header(None, alias="X-E2EE-Timestamp"),
+):
+    if not CHUTES_ENABLED:
+        return error(status_code=503, message="Chutes route is disabled", type="chutes_disabled")
+
+    if not CHUTES_API_KEY:
+        return error(status_code=503, message="CHUTES_API_KEY is not configured", type="chutes_misconfigured")
+
+    return await _chat_completions_impl(
+        request=request,
+        x_request_hash=x_request_hash,
+        x_signing_algo=x_signing_algo,
+        x_client_pub_key=x_client_pub_key,
+        x_model_pub_key=x_model_pub_key,
+        x_e2ee_version=x_e2ee_version,
+        x_e2ee_nonce=x_e2ee_nonce,
+        x_e2ee_timestamp=x_e2ee_timestamp,
+        backend_url=CHUTES_CHAT_COMPLETIONS_URL,
+        outbound_headers=_chutes_auth_headers(),
+    )
 
 
 # VLLM completions
@@ -410,7 +499,7 @@ async def signature(request: Request, chat_id: str, signing_algo: str = None):
 async def metrics(request: Request):
     # Get local metrics from the proxy
     local_metrics = get_proxy_metrics()
-    
+
     # Fetch metrics from the vLLM backend
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT)) as client:
@@ -423,7 +512,7 @@ async def metrics(request: Request):
     except Exception as e:
         log.error(f"Error fetching vLLM metrics: {e}")
         remote_metrics = f"# Error fetching vLLM metrics: {e}"
-        
+
     # Combine both and return
     combined_metrics = f"{local_metrics}\n\n# --- vLLM Backend Metrics ---\n\n{remote_metrics}"
     return PlainTextResponse(combined_metrics)
@@ -433,6 +522,24 @@ async def metrics(request: Request):
 async def models(request: Request):
     async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT)) as client:
         response = await client.get(VLLM_MODELS_URL)
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return JSONResponse(content=response.json())
+
+
+@router.get("/chutes/models", dependencies=[Depends(verify_authorization_header)])
+async def chutes_models(request: Request):
+    if not CHUTES_ENABLED:
+        return error(status_code=503, message="Chutes route is disabled", type="chutes_disabled")
+
+    if not CHUTES_API_KEY:
+        return error(status_code=503, message="CHUTES_API_KEY is not configured", type="chutes_misconfigured")
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(TIMEOUT),
+        headers=_with_outbound_headers(_chutes_auth_headers()),
+    ) as client:
+        response = await client.get(CHUTES_MODELS_URL)
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=response.text)
         return JSONResponse(content=response.json())
