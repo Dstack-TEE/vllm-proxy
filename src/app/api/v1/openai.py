@@ -53,6 +53,7 @@ VLLM_MODELS_URL = f"{VLLM_BASE_URL}/v1/models"
 
 CHUTES_ENABLED = os.getenv("CHUTES_ENABLED", "false").lower() in ("1", "true", "yes", "on")
 CHUTES_BASE_URL = os.getenv("CHUTES_BASE_URL", "https://llm.chutes.ai").rstrip("/")
+CHUTES_ATTESTATION_BASE_URL = os.getenv("CHUTES_ATTESTATION_BASE_URL", "https://api.chutes.ai").rstrip("/")
 CHUTES_CHAT_COMPLETIONS_URL = f"{CHUTES_BASE_URL}/v1/chat/completions"
 CHUTES_MODELS_URL = f"{CHUTES_BASE_URL}/v1/models"
 CHUTES_API_KEY = os.getenv("CHUTES_API_KEY")
@@ -348,7 +349,7 @@ async def attestation_chain(
             headers=_with_outbound_headers(_chutes_auth_headers()),
         ) as client:
             upstream_response = await client.get(
-                f"{CHUTES_BASE_URL}/v1/attestation/report",
+                f"{CHUTES_ATTESTATION_BASE_URL}/v1/attestation/report",
                 params=upstream_params,
             )
     except httpx.RequestError as exc:
@@ -368,7 +369,7 @@ async def attestation_chain(
         "nonce": nonce,
         "timestamp": int(time.time()),
         "provider": "chutes",
-        "upstream_base_url": CHUTES_BASE_URL,
+        "upstream_base_url": CHUTES_ATTESTATION_BASE_URL,
         "model": model,
         "upstream_attestation_sha256": upstream_attestation_sha256,
     }
@@ -383,7 +384,7 @@ async def attestation_chain(
         },
         "upstream": {
             "provider": "chutes",
-            "base_url": CHUTES_BASE_URL,
+            "base_url": CHUTES_ATTESTATION_BASE_URL,
             "model": model,
             "attestation": upstream_attestation,
             "attestation_sha256": upstream_attestation_sha256,

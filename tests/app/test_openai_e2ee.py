@@ -338,7 +338,7 @@ def test_attestation_report_includes_signing_public_key():
 @pytest.mark.asyncio
 @pytest.mark.respx
 async def test_attestation_chain_success(respx_mock):
-    upstream_url = "https://llm.chutes.ai/v1/attestation/report"
+    upstream_url = "https://api.chutes.ai/v1/attestation/report"
     upstream_att = {"report": "upstream-ok", "nonce": "n" * 16}
     respx_mock.get(upstream_url).mock(return_value=httpx.Response(200, json=upstream_att))
 
