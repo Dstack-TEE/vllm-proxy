@@ -1,7 +1,7 @@
 import os
 import json
-import time
 import hashlib
+import secrets
 import requests
 
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
@@ -18,7 +18,8 @@ def main():
     if not BASE_URL or not API_KEY or not MODEL_NAME:
         raise RuntimeError("Please set BASE_URL, API_KEY, MODEL_NAME")
 
-    nonce = f"chain-{int(time.time())}-proof"
+    # Use 32-byte hex nonce to match attestation implementations that expect hex challenge.
+    nonce = secrets.token_hex(32)
 
     url = f"{BASE_URL}/v1/attestation/chain"
     resp = requests.get(
