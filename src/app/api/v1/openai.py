@@ -360,7 +360,9 @@ async def _chat_completions_impl(
     )
 
 
-# VLLM Chat completions (existing path, unchanged behavior)
+# Chat completions (compat route):
+# - CHUTES_ENABLED=false -> original vLLM backend behavior
+# - CHUTES_ENABLED=true  -> transparently route to Chutes backend
 @router.post("/chat/completions", dependencies=[Depends(verify_authorization_header)])
 async def chat_completions(
     request: Request,
@@ -372,6 +374,15 @@ async def chat_completions(
     x_e2ee_nonce: Optional[str] = Header(None, alias="X-E2EE-Nonce"),
     x_e2ee_timestamp: Optional[str] = Header(None, alias="X-E2EE-Timestamp"),
 ):
+    backend_url = VLLM_URL
+    outbound_headers = None
+
+    if CHUTES_ENABLED:
+        if not CHUTES_API_KEY:
+            return error(status_code=503, message="CHUTES_API_KEY is not configured", type="chutes_misconfigured")
+        backend_url = CHUTES_CHAT_COMPLETIONS_URL
+        outbound_headers = _chutes_auth_headers()
+
     return await _chat_completions_impl(
         request=request,
         x_request_hash=x_request_hash,
@@ -381,7 +392,8 @@ async def chat_completions(
         x_e2ee_version=x_e2ee_version,
         x_e2ee_nonce=x_e2ee_nonce,
         x_e2ee_timestamp=x_e2ee_timestamp,
-        backend_url=VLLM_URL,
+        backend_url=backend_url,
+        outbound_headers=outbound_headers,
     )
 
 
