@@ -1,4 +1,3 @@
-import json
 import os
 from typing import Optional
 
@@ -9,7 +8,11 @@ from .redis import RedisCache
 
 CHAT_CACHE_EXPIRATION = int(os.getenv("CHAT_CACHE_EXPIRATION", "1200"))
 MODEL_NAME = os.getenv("MODEL_NAME")
-if not MODEL_NAME:
+CHUTES_ENABLED = os.getenv("CHUTES_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+# Stable namespace used for backward-compatible lookup when request model is dynamic.
+CHUTES_FALLBACK_MODEL_NAME = os.getenv("CHUTES_FALLBACK_MODEL_NAME", "chutes")
+
+if not CHUTES_ENABLED and not MODEL_NAME:
     raise ValueError("MODEL_NAME is not set")
 
 CHAT_PREFIX = "chat"
@@ -35,9 +38,23 @@ class ChatCache:
             return None
         return RedisCache(expiration=CHAT_CACHE_EXPIRATION)
 
-    def _make_key(self, prefix: str, key: str) -> str:
+    def _resolve_model_name(self, request_model: Optional[str] = None) -> str:
+        """Resolve model namespace for cache key."""
+        if request_model:
+            return request_model
+
+        if MODEL_NAME:
+            return MODEL_NAME
+
+        if CHUTES_ENABLED:
+            return CHUTES_FALLBACK_MODEL_NAME
+
+        raise ValueError("MODEL_NAME is not set")
+
+    def _make_key(self, prefix: str, key: str, model_name: Optional[str] = None) -> str:
         """Build namespaced cache key: model:prefix:key"""
-        return f"{MODEL_NAME}:{prefix}:{key}"
+        resolved_model_name = self._resolve_model_name(model_name)
+        return f"{resolved_model_name}:{prefix}:{key}"
 
     def _write_string(self, key: str, value: str) -> None:
         """Write string to local and optionally to Redis."""
@@ -63,16 +80,37 @@ class ChatCache:
 
     # Chat operations
 
-    def set_chat(self, chat_id: str, chat: str) -> None:
+    def set_chat(self, chat_id: str, chat: str, model_name: Optional[str] = None) -> None:
         """Store chat completion data."""
-        key = self._make_key(CHAT_PREFIX, chat_id)
+        key = self._make_key(CHAT_PREFIX, chat_id, model_name=model_name)
         self._write_string(key, chat)
 
-    def get_chat(self, chat_id: str) -> Optional[str]:
-        """Retrieve chat completion data."""
-        key = self._make_key(CHAT_PREFIX, chat_id)
-        return self._read_string(key)
+        # Backward-compatible fallback key for dynamic-model proxy mode.
+        if CHUTES_ENABLED and model_name:
+            fallback_key = self._make_key(
+                CHAT_PREFIX,
+                chat_id,
+                model_name=CHUTES_FALLBACK_MODEL_NAME,
+            )
+            if fallback_key != key:
+                self._write_string(fallback_key, chat)
 
+    def get_chat(self, chat_id: str, model_name: Optional[str] = None) -> Optional[str]:
+        """Retrieve chat completion data."""
+        key = self._make_key(CHAT_PREFIX, chat_id, model_name=model_name)
+        value = self._read_string(key)
+        if value:
+            return value
+
+        if CHUTES_ENABLED and model_name and model_name != CHUTES_FALLBACK_MODEL_NAME:
+            fallback_key = self._make_key(
+                CHAT_PREFIX,
+                chat_id,
+                model_name=CHUTES_FALLBACK_MODEL_NAME,
+            )
+            return self._read_string(fallback_key)
+
+        return None
 
 
 cache = ChatCache()

@@ -99,6 +99,7 @@ async def stream_vllm_response(
     request_hash: Optional[str] = None,
     e2ee_ctx=None,
     outbound_headers: Optional[dict[str, str]] = None,
+    model_name: Optional[str] = None,
 ):
     """
     Handle streaming backend request.
@@ -151,7 +152,9 @@ async def stream_vllm_response(
         # Cache the full request and response using the extracted cache key
         if chat_id:
             cache.set_chat(
-                chat_id, json.dumps(sign_chat(f"{request_sha256}:{response_sha256}"))
+                chat_id,
+                json.dumps(sign_chat(f"{request_sha256}:{response_sha256}")),
+                model_name=model_name,
             )
         else:
             error_message = "Chat id could not be extracted from the response"
@@ -195,6 +198,7 @@ async def non_stream_vllm_response(
     request_hash: Optional[str] = None,
     e2ee_ctx=None,
     outbound_headers: Optional[dict[str, str]] = None,
+    model_name: Optional[str] = None,
 ):
     """
     Handle non-streaming responses
@@ -230,7 +234,9 @@ async def non_stream_vllm_response(
         if chat_id:
             response_sha256 = sha256(json.dumps(response_data).encode("utf-8")).hexdigest()
             cache.set_chat(
-                chat_id, json.dumps(sign_chat(f"{request_sha256}:{response_sha256}"))
+                chat_id,
+                json.dumps(sign_chat(f"{request_sha256}:{response_sha256}")),
+                model_name=model_name,
             )
         else:
             raise Exception("Chat id could not be extracted from the response")
@@ -325,6 +331,7 @@ async def _chat_completions_impl(
 
     # Check if the request is for streaming or non-streaming
     is_stream = modified_json.get("stream", False)
+    request_model = modified_json.get("model")
     modified_request_body = json.dumps(modified_json).encode("utf-8")
 
     if is_stream:
@@ -335,6 +342,7 @@ async def _chat_completions_impl(
             x_request_hash,
             e2ee_ctx,
             outbound_headers=outbound_headers,
+            model_name=request_model,
         )
 
     response_data = await non_stream_vllm_response(
@@ -344,6 +352,7 @@ async def _chat_completions_impl(
         x_request_hash,
         e2ee_ctx,
         outbound_headers=outbound_headers,
+        model_name=request_model,
     )
     return JSONResponse(
         content=response_data,
@@ -445,24 +454,33 @@ async def completions(
     is_stream = modified_json.get(
         "stream", False
     )  # Default to non-streaming if not specified
+    request_model = modified_json.get("model")
     modified_request_body = json.dumps(modified_json).encode("utf-8")
     if is_stream:
         # Create a streaming response
         return await stream_vllm_response(
-            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash
+            VLLM_COMPLETIONS_URL,
+            request_body,
+            modified_request_body,
+            x_request_hash,
+            model_name=request_model,
         )
     else:
         # Handle non-streaming response
         response_data = await non_stream_vllm_response(
-            VLLM_COMPLETIONS_URL, request_body, modified_request_body, x_request_hash
+            VLLM_COMPLETIONS_URL,
+            request_body,
+            modified_request_body,
+            x_request_hash,
+            model_name=request_model,
         )
         return JSONResponse(content=response_data)
 
 
 # Get signature for chat_id of chat history
 @router.get("/signature/{chat_id}", dependencies=[Depends(verify_authorization_header)])
-async def signature(request: Request, chat_id: str, signing_algo: str = None):
-    cache_value = cache.get_chat(chat_id)
+async def signature(request: Request, chat_id: str, signing_algo: str = None, model: Optional[str] = None):
+    cache_value = cache.get_chat(chat_id, model_name=model)
     if cache_value is None:
         return not_found("Chat id not found or expired")
 
