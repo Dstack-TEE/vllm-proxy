@@ -3,11 +3,15 @@ import json
 import hashlib
 import secrets
 import requests
+from requests.exceptions import ReadTimeout
 
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
 API_KEY = os.environ.get("API_KEY", "")
 MODEL_NAME = os.environ.get("MODEL_NAME", "")
 SIGNING_ALGO = os.environ.get("SIGNING_ALGO", "ecdsa").lower()
+CONNECT_TIMEOUT = int(os.environ.get("CONNECT_TIMEOUT", "15"))
+READ_TIMEOUT = int(os.environ.get("READ_TIMEOUT", "300"))
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 
 
 def _canonical_json(obj) -> str:
@@ -22,23 +26,43 @@ def main():
     nonce = secrets.token_hex(32)
 
     url = f"{BASE_URL}/v1/attestation/chain"
-    resp = requests.get(
-        url,
-        params={"model": MODEL_NAME, "nonce": nonce, "signing_algo": SIGNING_ALGO},
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        timeout=90,
-    )
 
-    print("status:", resp.status_code)
-    if resp.status_code == 429:
-        print("body:", resp.text)
-        raise RuntimeError(
-            "429 from /v1/attestation/chain (likely upstream Chutes attestation rate limit). "
-            "Wait and retry, or reduce verification call frequency."
-        )
-    if resp.status_code >= 400:
-        print("body:", resp.text)
-    resp.raise_for_status()
+    resp = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                url,
+                params={"model": MODEL_NAME, "nonce": nonce, "signing_algo": SIGNING_ALGO},
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            )
+        except ReadTimeout:
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(
+                    f"Read timeout after {MAX_RETRIES} attempts (connect={CONNECT_TIMEOUT}s, read={READ_TIMEOUT}s)."
+                )
+            print(f"attempt {attempt}/{MAX_RETRIES} timed out, retrying...")
+            continue
+
+        print("status:", resp.status_code)
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            print("body:", resp.text)
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(
+                    "429 from /v1/attestation/chain (likely upstream Chutes attestation rate limit). "
+                    f"Retry-After={retry_after}."
+                )
+            print(f"attempt {attempt}/{MAX_RETRIES} got 429, retrying...")
+            continue
+
+        if resp.status_code >= 400:
+            print("body:", resp.text)
+        resp.raise_for_status()
+        break
+
+    if resp is None:
+        raise RuntimeError("No response received")
 
     data = resp.json()
 
