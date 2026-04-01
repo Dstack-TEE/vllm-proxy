@@ -325,12 +325,16 @@ async def attestation_chain(
     except ValueError:
         return invalid_signing_algo()
 
+    nonce = nonce.strip()
+    model = model.strip()
     if len(nonce) < 16:
         return error(
             status_code=400,
             message="nonce must be at least 16 characters",
             type="invalid_nonce",
         )
+    if not model:
+        return error(status_code=400, message="model must not be empty", type="invalid_model")
 
     try:
         proxy_attestation = _build_proxy_attestation(algo, nonce)
@@ -338,19 +342,25 @@ async def attestation_chain(
         raise HTTPException(status_code=400, detail=str(exc))
 
     upstream_params = {"model": model, "nonce": nonce, "signing_algo": algo}
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(TIMEOUT),
-        headers=_with_outbound_headers(_chutes_auth_headers()),
-    ) as client:
-        upstream_response = await client.get(
-            f"{CHUTES_BASE_URL}/v1/attestation/report",
-            params=upstream_params,
-        )
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(TIMEOUT),
+            headers=_with_outbound_headers(_chutes_auth_headers()),
+        ) as client:
+            upstream_response = await client.get(
+                f"{CHUTES_BASE_URL}/v1/attestation/report",
+                params=upstream_params,
+            )
+    except httpx.RequestError as exc:
+        return error(status_code=502, message=f"Failed to fetch upstream attestation: {exc}", type="upstream_unreachable")
 
     if upstream_response.status_code != 200:
         raise HTTPException(status_code=upstream_response.status_code, detail=upstream_response.text)
 
-    upstream_attestation = upstream_response.json()
+    try:
+        upstream_attestation = upstream_response.json()
+    except ValueError:
+        return error(status_code=502, message="Upstream attestation response is not valid JSON", type="upstream_invalid_response")
     upstream_raw = json.dumps(upstream_attestation, sort_keys=True, separators=(",", ":"))
     upstream_attestation_sha256 = hashlib.sha256(upstream_raw.encode("utf-8")).hexdigest()
 

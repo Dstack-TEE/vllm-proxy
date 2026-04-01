@@ -1,3 +1,4 @@
+import hashlib
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -354,7 +355,7 @@ async def test_attestation_chain_success(respx_mock):
     assert data["proxy"]["attestation"]["request_nonce"] == "a" * 16
     assert data["upstream"]["attestation"] == upstream_att
 
-    expected_hash = __import__("hashlib").sha256(
+    expected_hash = hashlib.sha256(
         json.dumps(upstream_att, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     assert data["upstream"]["attestation_sha256"] == expected_hash
@@ -372,3 +373,15 @@ def test_attestation_chain_nonce_too_short():
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_nonce"
+
+
+def test_attestation_chain_model_empty():
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": "   ", "nonce": "a" * 16, "signing_algo": "ecdsa"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_model"
