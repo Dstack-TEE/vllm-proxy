@@ -57,6 +57,8 @@ CHUTES_ATTESTATION_BASE_URL = os.getenv("CHUTES_ATTESTATION_BASE_URL", "https://
 CHUTES_CHAT_COMPLETIONS_URL = f"{CHUTES_BASE_URL}/v1/chat/completions"
 CHUTES_MODELS_URL = f"{CHUTES_BASE_URL}/v1/models"
 CHUTES_API_KEY = os.getenv("CHUTES_API_KEY")
+CHUTES_CHUTE_ID_CACHE: dict[str, tuple[str, float]] = {}
+CHUTES_CHUTE_ID_CACHE_TTL_SECONDS = int(os.getenv("CHUTES_CHUTE_ID_CACHE_TTL_SECONDS", "3600"))
 
 TIMEOUT = 60 * 10
 
@@ -289,6 +291,98 @@ def _build_proxy_attestation(signing_algo: str, nonce: str | None) -> dict:
     return resp
 
 
+def _error_from_upstream_429(response: httpx.Response):
+    retry_after = response.headers.get("Retry-After")
+    msg = "Upstream attestation is rate limited"
+    if retry_after:
+        msg = f"{msg}; retry after {retry_after} seconds"
+    return error(status_code=429, message=msg, type="upstream_rate_limited")
+
+
+async def _resolve_chute_id(client: httpx.AsyncClient, model: str) -> str | dict:
+    now = time.time()
+    cached = CHUTES_CHUTE_ID_CACHE.get(model)
+    if cached and now - cached[1] < CHUTES_CHUTE_ID_CACHE_TTL_SECONDS:
+        return cached[0]
+
+    resp = await client.get(
+        f"{CHUTES_ATTESTATION_BASE_URL}/chutes/",
+        params={"include_public": "true", "name": model},
+    )
+    if resp.status_code == 429:
+        return _error_from_upstream_429(resp)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    data = resp.json()
+    items = data.get("items") or []
+    if not items:
+        return error(status_code=404, message=f"No chute found for model: {model}", type="upstream_model_not_found")
+
+    chute_id = items[0].get("chute_id")
+    if not chute_id:
+        return error(status_code=502, message="Upstream chute lookup missing chute_id", type="upstream_invalid_response")
+
+    CHUTES_CHUTE_ID_CACHE[model] = (chute_id, now)
+    return chute_id
+
+
+async def _fetch_chutes_attestation(client: httpx.AsyncClient, model: str, nonce: str) -> tuple[dict | None, dict | None]:
+    chute_id_or_error = await _resolve_chute_id(client, model)
+    if isinstance(chute_id_or_error, dict) and chute_id_or_error.get("error"):
+        return None, chute_id_or_error
+    chute_id = chute_id_or_error
+
+    e2e_resp = await client.get(f"{CHUTES_ATTESTATION_BASE_URL}/e2e/instances/{chute_id}")
+    if e2e_resp.status_code == 429:
+        return None, _error_from_upstream_429(e2e_resp)
+    if e2e_resp.status_code != 200:
+        raise HTTPException(status_code=e2e_resp.status_code, detail=e2e_resp.text)
+
+    e2e_data = e2e_resp.json()
+    instances = e2e_data.get("instances") or []
+    pubkeys = {i.get("instance_id"): i.get("e2e_pubkey") for i in instances if i.get("instance_id")}
+
+    evidence_resp = await client.get(
+        f"{CHUTES_ATTESTATION_BASE_URL}/chutes/{chute_id}/evidence",
+        params={"nonce": nonce},
+    )
+    if evidence_resp.status_code == 429:
+        return None, _error_from_upstream_429(evidence_resp)
+    if evidence_resp.status_code != 200:
+        raise HTTPException(status_code=evidence_resp.status_code, detail=evidence_resp.text)
+
+    evidence_data = evidence_resp.json()
+    evidence_list = evidence_data.get("evidence") or []
+
+    all_attestations = []
+    for e in evidence_list:
+        iid = e.get("instance_id")
+        e2e_pubkey = pubkeys.get(iid)
+        if not iid or not e2e_pubkey:
+            continue
+        all_attestations.append(
+            {
+                "instance_id": iid,
+                "nonce": nonce,
+                "e2e_pubkey": e2e_pubkey,
+                "intel_quote": e.get("quote"),
+                "gpu_evidence": e.get("gpu_evidence", []),
+                "certificate": e.get("certificate"),
+            }
+        )
+
+    if not all_attestations:
+        return None, error(status_code=502, message="No usable upstream attestations returned", type="upstream_invalid_response")
+
+    return {
+        "attestation_type": "chutes",
+        "nonce": nonce,
+        "chute_id": chute_id,
+        "all_attestations": all_attestations,
+    }, None
+
+
 # Get attestation report of intel quote and nvidia payload
 @router.get("/attestation/report", dependencies=[Depends(verify_authorization_header)])
 async def attestation_report(
@@ -342,33 +436,18 @@ async def attestation_chain(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    upstream_params = {"model": model, "nonce": nonce, "signing_algo": algo}
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(TIMEOUT),
-            headers=_with_outbound_headers(_chutes_auth_headers()),
+            headers={"Authorization": f"Bearer {CHUTES_API_KEY}"},
         ) as client:
-            upstream_response = await client.get(
-                f"{CHUTES_ATTESTATION_BASE_URL}/v1/attestation/report",
-                params=upstream_params,
-            )
+            upstream_attestation, upstream_error = await _fetch_chutes_attestation(client, model, nonce)
     except httpx.RequestError as exc:
         return error(status_code=502, message=f"Failed to fetch upstream attestation: {exc}", type="upstream_unreachable")
 
-    if upstream_response.status_code == 429:
-        retry_after = upstream_response.headers.get("Retry-After")
-        msg = "Upstream attestation is rate limited"
-        if retry_after:
-            msg = f"{msg}; retry after {retry_after} seconds"
-        return error(status_code=429, message=msg, type="upstream_rate_limited")
+    if upstream_error is not None:
+        return upstream_error
 
-    if upstream_response.status_code != 200:
-        raise HTTPException(status_code=upstream_response.status_code, detail=upstream_response.text)
-
-    try:
-        upstream_attestation = upstream_response.json()
-    except ValueError:
-        return error(status_code=502, message="Upstream attestation response is not valid JSON", type="upstream_invalid_response")
     upstream_raw = json.dumps(upstream_attestation, sort_keys=True, separators=(",", ":"))
     upstream_attestation_sha256 = hashlib.sha256(upstream_raw.encode("utf-8")).hexdigest()
 

@@ -338,29 +338,55 @@ def test_attestation_report_includes_signing_public_key():
 @pytest.mark.asyncio
 @pytest.mark.respx
 async def test_attestation_chain_success(respx_mock):
-    upstream_url = "https://api.chutes.ai/v1/attestation/report"
-    upstream_att = {"report": "upstream-ok", "nonce": "n" * 16}
-    respx_mock.get(upstream_url).mock(return_value=httpx.Response(200, json=upstream_att))
+    model = "moonshotai/Kimi-K2.5-TEE"
+    nonce = "a" * 16
+
+    respx_mock.get("https://api.chutes.ai/chutes/").mock(
+        return_value=httpx.Response(200, json={"items": [{"chute_id": "chute-123"}]})
+    )
+    respx_mock.get("https://api.chutes.ai/e2e/instances/chute-123").mock(
+        return_value=httpx.Response(
+            200,
+            json={"instances": [{"instance_id": "inst-1", "e2e_pubkey": "pk-1"}]},
+        )
+    )
+    respx_mock.get("https://api.chutes.ai/chutes/chute-123/evidence").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "evidence": [
+                    {
+                        "instance_id": "inst-1",
+                        "quote": "intel-quote",
+                        "gpu_evidence": [{"gpu": "ok"}],
+                        "certificate": "cert",
+                    }
+                ]
+            },
+        )
+    )
 
     with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
         response = client.get(
             "/v1/attestation/chain",
-            params={"model": "moonshotai/Kimi-K2.5-TEE", "nonce": "a" * 16, "signing_algo": "ecdsa"},
+            params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
             headers={"Authorization": TEST_AUTH_HEADER},
         )
 
     assert response.status_code == 200
     data = response.json()
     assert data["version"] == "1"
-    assert data["proxy"]["attestation"]["request_nonce"] == "a" * 16
-    assert data["upstream"]["attestation"] == upstream_att
+    assert data["proxy"]["attestation"]["request_nonce"] == nonce
+    assert data["upstream"]["attestation"]["attestation_type"] == "chutes"
+    assert data["upstream"]["attestation"]["chute_id"] == "chute-123"
+    assert data["upstream"]["attestation"]["all_attestations"][0]["instance_id"] == "inst-1"
 
     expected_hash = hashlib.sha256(
-        json.dumps(upstream_att, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(data["upstream"]["attestation"], sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     assert data["upstream"]["attestation_sha256"] == expected_hash
     assert data["binding_proof"]["payload"]["upstream_attestation_sha256"] == expected_hash
-    assert data["binding_proof"]["payload"]["model"] == "moonshotai/Kimi-K2.5-TEE"
+    assert data["binding_proof"]["payload"]["model"] == model
 
 
 def test_attestation_chain_nonce_too_short():
