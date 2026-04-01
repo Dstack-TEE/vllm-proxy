@@ -30,6 +30,14 @@ def main():
     )
 
     print("status:", resp.status_code)
+    if resp.status_code == 429:
+        print("body:", resp.text)
+        raise RuntimeError(
+            "429 from /v1/attestation/chain (likely upstream Chutes attestation rate limit). "
+            "Wait and retry, or reduce verification call frequency."
+        )
+    if resp.status_code >= 400:
+        print("body:", resp.text)
     resp.raise_for_status()
 
     data = resp.json()

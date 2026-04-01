@@ -355,6 +355,13 @@ async def attestation_chain(
     except httpx.RequestError as exc:
         return error(status_code=502, message=f"Failed to fetch upstream attestation: {exc}", type="upstream_unreachable")
 
+    if upstream_response.status_code == 429:
+        retry_after = upstream_response.headers.get("Retry-After")
+        msg = "Upstream attestation is rate limited"
+        if retry_after:
+            msg = f"{msg}; retry after {retry_after} seconds"
+        return error(status_code=429, message=msg, type="upstream_rate_limited")
+
     if upstream_response.status_code != 200:
         raise HTTPException(status_code=upstream_response.status_code, detail=upstream_response.text)
 
