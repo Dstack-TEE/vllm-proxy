@@ -332,3 +332,43 @@ def test_attestation_report_includes_signing_public_key():
     assert "signing_public_key" in data
     assert len(data["signing_public_key"]) == 64
     assert data["all_attestations"][0]["signing_public_key"] == data["signing_public_key"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.respx
+async def test_attestation_chain_success(respx_mock):
+    upstream_url = "https://llm.chutes.ai/v1/attestation/report"
+    upstream_att = {"report": "upstream-ok", "nonce": "n" * 16}
+    respx_mock.get(upstream_url).mock(return_value=httpx.Response(200, json=upstream_att))
+
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": "moonshotai/Kimi-K2.5-TEE", "nonce": "a" * 16, "signing_algo": "ecdsa"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["version"] == "1"
+    assert data["proxy"]["attestation"]["request_nonce"] == "a" * 16
+    assert data["upstream"]["attestation"] == upstream_att
+
+    expected_hash = __import__("hashlib").sha256(
+        json.dumps(upstream_att, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert data["upstream"]["attestation_sha256"] == expected_hash
+    assert data["binding_proof"]["payload"]["upstream_attestation_sha256"] == expected_hash
+    assert data["binding_proof"]["payload"]["model"] == "moonshotai/Kimi-K2.5-TEE"
+
+
+def test_attestation_chain_nonce_too_short():
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": "moonshotai/Kimi-K2.5-TEE", "nonce": "short", "signing_algo": "ecdsa"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_nonce"

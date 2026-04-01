@@ -1,5 +1,7 @@
 import json
 import os
+import time
+import hashlib
 from hashlib import sha256
 from typing import Optional
 
@@ -268,6 +270,24 @@ def strip_empty_tool_calls(payload: dict) -> dict:
     return payload
 
 
+def _normalize_signing_algo(signing_algo: str | None) -> str:
+    algo = ECDSA if signing_algo is None else signing_algo.strip().lower()
+    if algo not in [ECDSA, ED25519]:
+        raise ValueError("invalid_signing_algo")
+    return algo
+
+
+def _build_proxy_attestation(signing_algo: str, nonce: str | None) -> dict:
+    context = ecdsa_context if signing_algo == ECDSA else ed25519_context
+    attestation = dict(generate_attestation(context, nonce))
+    attestation["signing_public_key"] = local_model_public_key_hex(signing_algo)
+
+    resp = dict(attestation)
+    resp["signing_public_key"] = attestation["signing_public_key"]
+    resp["all_attestations"] = [attestation]
+    return resp
+
+
 # Get attestation report of intel quote and nvidia payload
 @router.get("/attestation/report", dependencies=[Depends(verify_authorization_header)])
 async def attestation_report(
@@ -276,22 +296,95 @@ async def attestation_report(
     nonce: str | None = Query(None),
     signing_address: str | None = Query(None),
 ):
-    signing_algo = ECDSA if signing_algo is None else signing_algo
-    if signing_algo not in [ECDSA, ED25519]:
+    try:
+        algo = _normalize_signing_algo(signing_algo)
+    except ValueError:
         return invalid_signing_algo()
 
-    context = ecdsa_context if signing_algo == ECDSA else ed25519_context
-
     try:
-        attestation = dict(generate_attestation(context, nonce))
+        return _build_proxy_attestation(algo, nonce)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    attestation["signing_public_key"] = local_model_public_key_hex(signing_algo)
-    resp = dict(attestation)
-    resp["signing_public_key"] = attestation["signing_public_key"]
-    resp["all_attestations"] = [attestation]
-    return resp
+
+@router.get("/attestation/chain", dependencies=[Depends(verify_authorization_header)])
+async def attestation_chain(
+    request: Request,
+    model: str = Query(...),
+    nonce: str = Query(...),
+    signing_algo: str | None = None,
+):
+    if not CHUTES_ENABLED:
+        return error(status_code=503, message="Chutes route is disabled", type="chutes_disabled")
+
+    if not CHUTES_API_KEY:
+        return error(status_code=503, message="CHUTES_API_KEY is not configured", type="chutes_misconfigured")
+
+    try:
+        algo = _normalize_signing_algo(signing_algo)
+    except ValueError:
+        return invalid_signing_algo()
+
+    if len(nonce) < 16:
+        return error(
+            status_code=400,
+            message="nonce must be at least 16 characters",
+            type="invalid_nonce",
+        )
+
+    try:
+        proxy_attestation = _build_proxy_attestation(algo, nonce)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    upstream_params = {"model": model, "nonce": nonce, "signing_algo": algo}
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(TIMEOUT),
+        headers=_with_outbound_headers(_chutes_auth_headers()),
+    ) as client:
+        upstream_response = await client.get(
+            f"{CHUTES_BASE_URL}/v1/attestation/report",
+            params=upstream_params,
+        )
+
+    if upstream_response.status_code != 200:
+        raise HTTPException(status_code=upstream_response.status_code, detail=upstream_response.text)
+
+    upstream_attestation = upstream_response.json()
+    upstream_raw = json.dumps(upstream_attestation, sort_keys=True, separators=(",", ":"))
+    upstream_attestation_sha256 = hashlib.sha256(upstream_raw.encode("utf-8")).hexdigest()
+
+    binding_payload = {
+        "nonce": nonce,
+        "timestamp": int(time.time()),
+        "provider": "chutes",
+        "upstream_base_url": CHUTES_BASE_URL,
+        "model": model,
+        "upstream_attestation_sha256": upstream_attestation_sha256,
+    }
+    binding_text = json.dumps(binding_payload, sort_keys=True, separators=(",", ":"))
+    context = ecdsa_context if algo == ECDSA else ed25519_context
+
+    return {
+        "version": "1",
+        "proxy": {
+            "attestation": proxy_attestation,
+            "signing_public_key": proxy_attestation.get("signing_public_key"),
+        },
+        "upstream": {
+            "provider": "chutes",
+            "base_url": CHUTES_BASE_URL,
+            "model": model,
+            "attestation": upstream_attestation,
+            "attestation_sha256": upstream_attestation_sha256,
+        },
+        "binding_proof": {
+            "payload": binding_payload,
+            "signature": sign_message(context, binding_text),
+            "signing_algo": algo,
+            "signing_address": context.signing_address,
+        },
+    }
 
 
 async def _chat_completions_impl(
