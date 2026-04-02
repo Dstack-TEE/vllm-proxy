@@ -4,6 +4,9 @@ import hashlib
 import secrets
 import requests
 from requests.exceptions import ReadTimeout
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
 API_KEY = os.environ.get("API_KEY", "")
@@ -16,6 +19,37 @@ MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
 
 def _canonical_json(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
+def _verify_binding_signature(binding_proof: dict):
+    payload_text = _canonical_json(binding_proof["payload"])
+    signing_algo = binding_proof.get("signing_algo")
+    signature = binding_proof.get("signature")
+    signing_address = binding_proof.get("signing_address")
+
+    if signing_algo == "ecdsa":
+        if not signature or not signature.startswith("0x"):
+            raise RuntimeError("invalid ecdsa signature format")
+        recovered = Account.recover_message(
+            encode_defunct(text=payload_text),
+            signature=signature,
+        )
+        if recovered.lower() != (signing_address or "").lower():
+            raise RuntimeError(
+                f"binding signature mismatch: recovered={recovered}, expected={signing_address}"
+            )
+        return recovered
+
+    if signing_algo == "ed25519":
+        # In this project ed25519 signing_address is the raw public key hex.
+        pubkey_hex = signing_address or ""
+        if len(pubkey_hex) != 64:
+            raise RuntimeError("invalid ed25519 signing_address/public key")
+        pubkey = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
+        pubkey.verify(bytes.fromhex(signature), payload_text.encode("utf-8"))
+        return pubkey_hex
+
+    raise RuntimeError(f"unsupported signing_algo: {signing_algo}")
 
 
 def main():
@@ -91,6 +125,14 @@ def main():
     assert bp.get("signing_algo") == SIGNING_ALGO, "binding signing_algo mismatch"
     assert bp.get("signature"), "binding signature missing"
 
+    # Signature verification: proves the binding payload was signed by proxy signing identity.
+    recovered_signer = _verify_binding_signature(bp)
+    proxy_signing_address = proxy_att.get("signing_address")
+    if proxy_signing_address:
+        assert recovered_signer.lower() == proxy_signing_address.lower(), (
+            f"proxy signing address mismatch: recovered={recovered_signer}, proxy={proxy_signing_address}"
+        )
+
     # Optional sanity: if upstream carries nonce, it should match
     upstream_nonce = upstream_att.get("request_nonce") or upstream_att.get("nonce")
     if upstream_nonce is not None:
@@ -100,6 +142,7 @@ def main():
     print("nonce:", nonce)
     print("model:", MODEL_NAME)
     print("signing_algo:", SIGNING_ALGO)
+    print("binding_signer:", recovered_signer)
     print("upstream_attestation_sha256:", upstream_hash)
 
 
