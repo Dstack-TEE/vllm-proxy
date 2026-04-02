@@ -386,7 +386,7 @@ async def _fetch_chutes_attestation(client: httpx.AsyncClient, model: str, nonce
 
 
 def _decode_quote(quote_b64: str) -> bytes:
-    return base64.b64decode(quote_b64)
+    return base64.b64decode(quote_b64, validate=True)
 
 
 def _extract_td_attributes(quote_bytes: bytes) -> int:
@@ -432,7 +432,12 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
     except Exception:
         return ["invalid_quote_base64"]
 
-    tdx_result = (attestation.get("tdx_verification") or {}).get("result") or {}
+    tdx_verification = attestation.get("tdx_verification") or {}
+    tdx_error = tdx_verification.get("error")
+    if tdx_error:
+        errors.append("tdx_online_verification_error")
+
+    tdx_result = tdx_verification.get("result") or {}
     tdx_status = tdx_result.get("status")
     if tdx_status != "UpToDate":
         errors.append(f"tdx_status_not_uptodate:{tdx_status or 'missing'}")

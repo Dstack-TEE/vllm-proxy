@@ -497,6 +497,39 @@ def test_attestation_chain_nonce_too_short():
     assert response.json()["error"]["type"] == "invalid_nonce"
 
 
+def test_attestation_chain_proxy_mode_rejects_tdx_online_verification_error():
+    model = "moonshotai/Kimi-K2.5-TEE"
+    nonce = "c" * 16
+
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"), patch(
+        "app.api.v1.openai._fetch_chutes_attestation",
+        return_value=(
+            {
+                "attestation_type": "chutes",
+                "nonce": nonce,
+                "chute_id": "chute-123",
+                "all_attestations": [
+                    {
+                        "instance_id": "inst-1",
+                        "e2e_pubkey": "pk-1",
+                        "intel_quote": _make_chutes_quote_b64(nonce, "pk-1"),
+                        "tdx_verification": {"error": "upstream verifier timeout", "result": {"status": "UpToDate"}},
+                    }
+                ],
+            },
+            None,
+        ),
+    ):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "chutes_verification_failed"
+
+
 def test_attestation_chain_invalid_verify_mode():
     with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
         response = client.get(
