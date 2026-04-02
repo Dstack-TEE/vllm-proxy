@@ -8,3 +8,4 @@ dstack-sdk==0.5.3
 cryptography==43.0.1
 redis==5.2.1
 nv-ppcie-verifier==1.5.0
+dcap-qvl>=0.3.13
