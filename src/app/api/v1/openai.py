@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from typing import Any, Optional
 
@@ -417,6 +419,30 @@ def _extract_gpu_tokens(attestation: dict[str, Any]) -> Any:
     return attestation.get("gpu_evidence")
 
 
+def _verify_tdx_online(quote_b64: str) -> dict[str, Any]:
+    try:
+        import dcap_qvl
+
+        quote_bytes = _decode_quote(quote_b64)
+
+        def run_verification():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(dcap_qvl.get_collateral_and_verify(quote_bytes))
+            finally:
+                loop.close()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run_verification)
+            verified_report = future.result(timeout=30)
+
+        result = json.loads(verified_report.to_json())
+        return {"result": result, "error": None}
+    except Exception as exc:
+        return {"result": None, "error": str(exc)}
+
+
 def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -> dict[str, Any]:
     errors: list[str] = []
     detail: dict[str, Any] = {
@@ -444,14 +470,16 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
         detail["errors"] = ["invalid_quote_base64"]
         return detail
 
-    tdx_verification = attestation.get("tdx_verification") or {}
+    tdx_verification = _verify_tdx_online(quote_b64)
     tdx_error = tdx_verification.get("error")
     if tdx_error:
         detail["tdx_error_present"] = True
         errors.append("tdx_online_verification_error")
 
     tdx_result = tdx_verification.get("result")
-    if tdx_result:
+    if not tdx_result:
+        errors.append("tdx_status_missing")
+    else:
         tdx_status = tdx_result.get("status") or "missing"
         detail["tdx_status"] = tdx_status
         if tdx_status != "UpToDate":

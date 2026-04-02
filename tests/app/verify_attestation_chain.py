@@ -155,7 +155,7 @@ def _run_mode(verify_mode: str):
         print("[OK] /v1/attestation/chain proxy mode validated")
         print("verification_summary:", json.dumps(summary, ensure_ascii=False))
         print("instance_results_count:", len(instance_results))
-        print("instance_results_preview:", json.dumps(instance_results[:2], ensure_ascii=False))
+        print("instance_results:", json.dumps(instance_results, ensure_ascii=False))
 
     print("nonce:", nonce)
     print("model:", MODEL_NAME)

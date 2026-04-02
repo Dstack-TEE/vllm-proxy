@@ -385,7 +385,10 @@ async def test_attestation_chain_success_proxy_mode(respx_mock):
         )
     )
 
-    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"), patch(
+        "app.api.v1.openai._verify_tdx_online",
+        return_value={"result": {"status": "UpToDate"}, "error": None},
+    ):
         response = client.get(
             "/v1/attestation/chain",
             params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
@@ -503,7 +506,7 @@ def test_attestation_chain_nonce_too_short():
 
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_attestation_chain_proxy_mode_allows_missing_tdx_result_if_other_checks_pass(respx_mock):
+async def test_attestation_chain_proxy_mode_uses_online_tdx_verification(respx_mock):
     model = "moonshotai/Kimi-K2.5-TEE"
     nonce = "d" * 16
     e2e_pubkey = "pk-3"
@@ -533,7 +536,10 @@ async def test_attestation_chain_proxy_mode_allows_missing_tdx_result_if_other_c
         )
     )
 
-    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"), patch(
+        "app.api.v1.openai._verify_tdx_online",
+        return_value={"result": {"status": "UpToDate"}, "error": None},
+    ):
         response = client.get(
             "/v1/attestation/chain",
             params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
@@ -560,13 +566,12 @@ def test_attestation_chain_proxy_mode_rejects_tdx_online_verification_error():
                         "instance_id": "inst-1",
                         "e2e_pubkey": "pk-1",
                         "intel_quote": _make_chutes_quote_b64(nonce, "pk-1"),
-                        "tdx_verification": {"error": "upstream verifier timeout", "result": {"status": "UpToDate"}},
                     }
                 ],
             },
             None,
         ),
-    ):
+    ), patch("app.api.v1.openai._verify_tdx_online", return_value={"result": None, "error": "tdx verify failed"}):
         response = client.get(
             "/v1/attestation/chain",
             params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
