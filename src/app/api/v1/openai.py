@@ -437,10 +437,11 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
     if tdx_error:
         errors.append("tdx_online_verification_error")
 
-    tdx_result = tdx_verification.get("result") or {}
-    tdx_status = tdx_result.get("status")
-    if tdx_status != "UpToDate":
-        errors.append(f"tdx_status_not_uptodate:{tdx_status or 'missing'}")
+    tdx_result = tdx_verification.get("result")
+    if tdx_result:
+        tdx_status = tdx_result.get("status")
+        if tdx_status != "UpToDate":
+            errors.append(f"tdx_status_not_uptodate:{tdx_status or 'missing'}")
 
     try:
         td_attributes = _extract_td_attributes(quote_bytes)

@@ -497,6 +497,49 @@ def test_attestation_chain_nonce_too_short():
     assert response.json()["error"]["type"] == "invalid_nonce"
 
 
+@pytest.mark.asyncio
+@pytest.mark.respx
+async def test_attestation_chain_proxy_mode_allows_missing_tdx_result_if_other_checks_pass(respx_mock):
+    model = "moonshotai/Kimi-K2.5-TEE"
+    nonce = "d" * 16
+    e2e_pubkey = "pk-3"
+    quote_b64 = _make_chutes_quote_b64(nonce, e2e_pubkey)
+
+    respx_mock.get("https://api.chutes.ai/chutes/").mock(
+        return_value=httpx.Response(200, json={"items": [{"chute_id": "chute-777"}]})
+    )
+    respx_mock.get("https://api.chutes.ai/e2e/instances/chute-777").mock(
+        return_value=httpx.Response(
+            200,
+            json={"instances": [{"instance_id": "inst-3", "e2e_pubkey": e2e_pubkey}]},
+        )
+    )
+    respx_mock.get("https://api.chutes.ai/chutes/chute-777/evidence").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "evidence": [
+                    {
+                        "instance_id": "inst-3",
+                        "quote": quote_b64,
+                        "certificate": "cert",
+                    }
+                ]
+            },
+        )
+    )
+
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["verification_receipt"]["payload"]["result"] == "pass"
+
+
 def test_attestation_chain_proxy_mode_rejects_tdx_online_verification_error():
     model = "moonshotai/Kimi-K2.5-TEE"
     nonce = "c" * 16
