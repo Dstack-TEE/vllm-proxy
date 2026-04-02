@@ -15,7 +15,7 @@ SIGNING_ALGO = os.environ.get("SIGNING_ALGO", "ecdsa").lower()
 CONNECT_TIMEOUT = int(os.environ.get("CONNECT_TIMEOUT", "15"))
 READ_TIMEOUT = int(os.environ.get("READ_TIMEOUT", "300"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
-VERIFY_MODE = os.environ.get("VERIFY_MODE", "proxy").lower()
+VERIFY_MODE = os.environ.get("VERIFY_MODE", "both").lower()
 
 
 def _canonical_json(obj) -> str:
@@ -53,13 +53,8 @@ def _verify_binding_signature(binding_proof: dict):
     raise RuntimeError(f"unsupported signing_algo: {signing_algo}")
 
 
-def main():
-    if not BASE_URL or not API_KEY or not MODEL_NAME:
-        raise RuntimeError("Please set BASE_URL, API_KEY, MODEL_NAME")
-
-    # Use 32-byte hex nonce to match attestation implementations that expect hex challenge.
+def _run_mode(verify_mode: str):
     nonce = secrets.token_hex(32)
-
     url = f"{BASE_URL}/v1/attestation/chain"
 
     resp = None
@@ -67,7 +62,7 @@ def main():
         try:
             resp = requests.get(
                 url,
-                params={"model": MODEL_NAME, "nonce": nonce, "signing_algo": SIGNING_ALGO, "verify_mode": VERIFY_MODE},
+                params={"model": MODEL_NAME, "nonce": nonce, "signing_algo": SIGNING_ALGO, "verify_mode": verify_mode},
                 headers={"Authorization": f"Bearer {API_KEY}"},
                 timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
             )
@@ -76,23 +71,23 @@ def main():
                 raise RuntimeError(
                     f"Read timeout after {MAX_RETRIES} attempts (connect={CONNECT_TIMEOUT}s, read={READ_TIMEOUT}s)."
                 )
-            print(f"attempt {attempt}/{MAX_RETRIES} timed out, retrying...")
+            print(f"[{verify_mode}] attempt {attempt}/{MAX_RETRIES} timed out, retrying...")
             continue
 
-        print("status:", resp.status_code)
+        print(f"[{verify_mode}] status:", resp.status_code)
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
-            print("body:", resp.text)
+            print(f"[{verify_mode}] body:", resp.text)
             if attempt == MAX_RETRIES:
                 raise RuntimeError(
                     "429 from /v1/attestation/chain (likely upstream Chutes attestation rate limit). "
                     f"Retry-After={retry_after}."
                 )
-            print(f"attempt {attempt}/{MAX_RETRIES} got 429, retrying...")
+            print(f"[{verify_mode}] attempt {attempt}/{MAX_RETRIES} got 429, retrying...")
             continue
 
         if resp.status_code >= 400:
-            print("body:", resp.text)
+            print(f"[{verify_mode}] body:", resp.text)
         resp.raise_for_status()
         break
 
@@ -100,10 +95,8 @@ def main():
         raise RuntimeError("No response received")
 
     data = resp.json()
-
-    # Top-level structure checks
     assert data.get("version") == "1", "unexpected chain version"
-    assert data.get("verify_mode") == VERIFY_MODE, f"unexpected verify_mode: {data.get('verify_mode')}"
+    assert data.get("verify_mode") == verify_mode, f"unexpected verify_mode: {data.get('verify_mode')}"
     assert "proxy" in data, "missing proxy section"
 
     proxy = data["proxy"]
@@ -111,7 +104,7 @@ def main():
     assert proxy.get("signing_public_key"), "missing proxy.signing_public_key"
     assert proxy_att.get("signing_public_key") == proxy["signing_public_key"], "proxy signing_public_key mismatch"
 
-    if VERIFY_MODE == "passthrough":
+    if verify_mode == "passthrough":
         assert "upstream" in data and "binding_proof" in data, "missing passthrough sections"
         upstream = data["upstream"]
         upstream_att = upstream["attestation"]
@@ -145,12 +138,34 @@ def main():
         assert payload.get("model") == MODEL_NAME, "receipt model mismatch"
         assert payload.get("nonce") == nonce, "receipt nonce mismatch"
 
+        summary = payload.get("verification_summary") or {}
+        instance_results = payload.get("instance_results") or []
+        assert summary.get("total_instances") == len(instance_results), "summary total_instances mismatch"
+        assert summary.get("binding_verified_instances", 0) >= 1, "expected at least one binding-verified instance"
+
         print("[OK] /v1/attestation/chain proxy mode validated")
+        print("verification_summary:", json.dumps(summary, ensure_ascii=False))
+        print("instance_results_preview:", json.dumps(instance_results[:2], ensure_ascii=False))
 
     print("nonce:", nonce)
     print("model:", MODEL_NAME)
     print("signing_algo:", SIGNING_ALGO)
-    print("verify_mode:", VERIFY_MODE)
+    print("verify_mode:", verify_mode)
+
+
+def main():
+    if not BASE_URL or not API_KEY or not MODEL_NAME:
+        raise RuntimeError("Please set BASE_URL, API_KEY, MODEL_NAME")
+
+    if VERIFY_MODE == "both":
+        _run_mode("proxy")
+        _run_mode("passthrough")
+        return
+
+    if VERIFY_MODE not in {"proxy", "passthrough"}:
+        raise RuntimeError("VERIFY_MODE must be one of: proxy, passthrough, both")
+
+    _run_mode(VERIFY_MODE)
 
 
 if __name__ == "__main__":

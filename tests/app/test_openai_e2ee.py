@@ -400,6 +400,10 @@ async def test_attestation_chain_success_proxy_mode(respx_mock):
     assert "verification_receipt" in data
     assert data["verification_receipt"]["payload"]["result"] == "pass"
     assert data["verification_receipt"]["payload"]["model"] == model
+    summary = data["verification_receipt"]["payload"]["verification_summary"]
+    assert summary["total_instances"] == 1
+    assert summary["binding_verified_instances"] == 1
+    assert len(data["verification_receipt"]["payload"]["instance_results"]) == 1
 
 
 @pytest.mark.asyncio

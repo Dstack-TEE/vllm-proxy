@@ -417,34 +417,49 @@ def _extract_gpu_tokens(attestation: dict[str, Any]) -> Any:
     return attestation.get("gpu_evidence")
 
 
-def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -> list[str]:
+def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -> dict[str, Any]:
     errors: list[str] = []
+    detail: dict[str, Any] = {
+        "instance_id": attestation.get("instance_id"),
+        "tdx_status": "missing",
+        "tdx_error_present": False,
+        "debug_mode_disabled": False,
+        "binding_verified": False,
+        "gpu_token_checked": False,
+        "gpu_verified": None,
+    }
 
     quote_b64 = attestation.get("intel_quote") or attestation.get("quote")
     e2e_pubkey = attestation.get("e2e_pubkey")
     if not quote_b64:
-        return ["missing_intel_quote"]
+        detail["errors"] = ["missing_intel_quote"]
+        return detail
     if not e2e_pubkey:
-        return ["missing_e2e_pubkey"]
+        detail["errors"] = ["missing_e2e_pubkey"]
+        return detail
 
     try:
         quote_bytes = _decode_quote(quote_b64)
     except Exception:
-        return ["invalid_quote_base64"]
+        detail["errors"] = ["invalid_quote_base64"]
+        return detail
 
     tdx_verification = attestation.get("tdx_verification") or {}
     tdx_error = tdx_verification.get("error")
     if tdx_error:
+        detail["tdx_error_present"] = True
         errors.append("tdx_online_verification_error")
 
     tdx_result = tdx_verification.get("result")
     if tdx_result:
-        tdx_status = tdx_result.get("status")
+        tdx_status = tdx_result.get("status") or "missing"
+        detail["tdx_status"] = tdx_status
         if tdx_status != "UpToDate":
-            errors.append(f"tdx_status_not_uptodate:{tdx_status or 'missing'}")
+            errors.append(f"tdx_status_not_uptodate:{tdx_status}")
 
     try:
         td_attributes = _extract_td_attributes(quote_bytes)
+        detail["debug_mode_disabled"] = not (td_attributes & 1)
         if td_attributes & 1:
             errors.append("tdx_debug_mode_enabled")
     except Exception:
@@ -452,29 +467,42 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
 
     expected_report_data = sha256((nonce + e2e_pubkey).encode("utf-8")).hexdigest().lower()
     actual_report_data = _extract_report_data_sha256(quote_bytes)
+    detail["expected_report_data"] = expected_report_data
+    detail["actual_report_data"] = actual_report_data
     if actual_report_data != expected_report_data:
         errors.append("report_data_binding_mismatch")
+    else:
+        detail["binding_verified"] = True
 
     gpu_tokens = _extract_gpu_tokens(attestation)
     if isinstance(gpu_tokens, dict):
         if gpu_tokens.get("error"):
+            detail["gpu_token_checked"] = True
+            detail["gpu_verified"] = False
             errors.append("gpu_tokens_error")
         tokens = gpu_tokens.get("tokens")
         if tokens:
+            detail["gpu_token_checked"] = True
             try:
                 platform_entry = tokens[0]
                 if not isinstance(platform_entry, list) or len(platform_entry) < 2:
+                    detail["gpu_verified"] = False
                     errors.append("gpu_platform_token_format_invalid")
                 else:
                     platform_claims = _decode_jwt_payload_without_verification(platform_entry[1])
-                    if platform_claims.get("x-nvidia-overall-att-result") is not True:
+                    overall_ok = platform_claims.get("x-nvidia-overall-att-result") is True
+                    nonce_ok = platform_claims.get("eat_nonce") == expected_report_data
+                    detail["gpu_verified"] = overall_ok and nonce_ok
+                    if not overall_ok:
                         errors.append("gpu_overall_attestation_failed")
-                    if platform_claims.get("eat_nonce") != expected_report_data:
+                    if not nonce_ok:
                         errors.append("gpu_eat_nonce_mismatch")
             except Exception:
+                detail["gpu_verified"] = False
                 errors.append("gpu_tokens_parse_failed")
 
-    return errors
+    detail["errors"] = errors
+    return detail
 
 
 def _verify_chutes_attestation_bundle(attestation_bundle: dict[str, Any], nonce: str) -> tuple[bool, list[dict[str, Any]]]:
@@ -485,11 +513,10 @@ def _verify_chutes_attestation_bundle(attestation_bundle: dict[str, Any], nonce:
 
     all_ok = True
     for att in attestations:
-        instance_id = att.get("instance_id")
-        att_errors = _verify_single_chutes_attestation(att, nonce)
-        if att_errors:
+        att_detail = _verify_single_chutes_attestation(att, nonce)
+        if att_detail.get("errors"):
             all_ok = False
-        details.append({"instance_id": instance_id, "errors": att_errors})
+        details.append(att_detail)
 
     return all_ok, details
 
@@ -611,6 +638,10 @@ async def attestation_chain(
             type="chutes_verification_failed",
         )
 
+    total_instances = len(verification_details)
+    uptodate_instances = sum(1 for d in verification_details if d.get("tdx_status") == "UpToDate")
+    binding_verified_instances = sum(1 for d in verification_details if d.get("binding_verified") is True)
+
     receipt_payload = {
         "nonce": nonce,
         "request_hash": sha256(f"{model}:{nonce}".encode("utf-8")).hexdigest(),
@@ -625,6 +656,12 @@ async def attestation_chain(
         "binding_signing_address": binding_proof["signing_address"],
         "verified_at": int(time.time()),
         "result": "pass",
+        "verification_summary": {
+            "total_instances": total_instances,
+            "tdx_uptodate_instances": uptodate_instances,
+            "binding_verified_instances": binding_verified_instances,
+        },
+        "instance_results": verification_details,
     }
     receipt_text = json.dumps(receipt_payload, sort_keys=True, separators=(",", ":"))
 
