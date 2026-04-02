@@ -1,4 +1,7 @@
+import base64
 import hashlib
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -335,11 +338,27 @@ def test_attestation_report_includes_signing_public_key():
     assert data["all_attestations"][0]["signing_public_key"] == data["signing_public_key"]
 
 
+def _make_chutes_quote_b64(nonce: str, e2e_pubkey: str, *, debug_enabled: bool = False) -> str:
+    quote_bytes = bytearray(700)
+
+    td_attributes_offset = 48 + 120
+    quote_bytes[td_attributes_offset : td_attributes_offset + 8] = (1 if debug_enabled else 0).to_bytes(8, "little")
+
+    report_data_offset = 48 + 520
+    report_data_hex = hashlib.sha256((nonce + e2e_pubkey).encode("utf-8")).hexdigest()
+    report_data_bytes = bytes.fromhex(report_data_hex) + bytes(32)
+    quote_bytes[report_data_offset : report_data_offset + 64] = report_data_bytes
+
+    return base64.b64encode(bytes(quote_bytes)).decode("utf-8")
+
+
 @pytest.mark.asyncio
 @pytest.mark.respx
-async def test_attestation_chain_success(respx_mock):
+async def test_attestation_chain_success_proxy_mode(respx_mock):
     model = "moonshotai/Kimi-K2.5-TEE"
     nonce = "a" * 16
+    e2e_pubkey = "pk-1"
+    quote_b64 = _make_chutes_quote_b64(nonce, e2e_pubkey)
 
     respx_mock.get("https://api.chutes.ai/chutes/").mock(
         return_value=httpx.Response(200, json={"items": [{"chute_id": "chute-123"}]})
@@ -347,7 +366,7 @@ async def test_attestation_chain_success(respx_mock):
     respx_mock.get("https://api.chutes.ai/e2e/instances/chute-123").mock(
         return_value=httpx.Response(
             200,
-            json={"instances": [{"instance_id": "inst-1", "e2e_pubkey": "pk-1"}]},
+            json={"instances": [{"instance_id": "inst-1", "e2e_pubkey": e2e_pubkey}]},
         )
     )
     respx_mock.get("https://api.chutes.ai/chutes/chute-123/evidence").mock(
@@ -357,8 +376,8 @@ async def test_attestation_chain_success(respx_mock):
                 "evidence": [
                     {
                         "instance_id": "inst-1",
-                        "quote": "intel-quote",
-                        "gpu_evidence": [{"gpu": "ok"}],
+                        "quote": quote_b64,
+                        "tdx_verification": {"result": {"status": "UpToDate"}},
                         "certificate": "cert",
                     }
                 ]
@@ -376,17 +395,94 @@ async def test_attestation_chain_success(respx_mock):
     assert response.status_code == 200
     data = response.json()
     assert data["version"] == "1"
+    assert data["verify_mode"] == "proxy"
     assert data["proxy"]["attestation"]["request_nonce"] == nonce
-    assert data["upstream"]["attestation"]["attestation_type"] == "chutes"
-    assert data["upstream"]["attestation"]["chute_id"] == "chute-123"
-    assert data["upstream"]["attestation"]["all_attestations"][0]["instance_id"] == "inst-1"
+    assert "verification_receipt" in data
+    assert data["verification_receipt"]["payload"]["result"] == "pass"
+    assert data["verification_receipt"]["payload"]["model"] == model
 
+
+@pytest.mark.asyncio
+@pytest.mark.respx
+async def test_attestation_chain_passthrough_mode_returns_upstream_bundle(respx_mock):
+    model = "moonshotai/Kimi-K2.5-TEE"
+    nonce = "b" * 16
+    e2e_pubkey = "pk-2"
+    quote_b64 = _make_chutes_quote_b64(nonce, e2e_pubkey)
+
+    respx_mock.get("https://api.chutes.ai/chutes/").mock(
+        return_value=httpx.Response(200, json={"items": [{"chute_id": "chute-321"}]})
+    )
+    respx_mock.get("https://api.chutes.ai/e2e/instances/chute-321").mock(
+        return_value=httpx.Response(
+            200,
+            json={"instances": [{"instance_id": "inst-2", "e2e_pubkey": e2e_pubkey}]},
+        )
+    )
+    respx_mock.get("https://api.chutes.ai/chutes/chute-321/evidence").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "evidence": [
+                    {
+                        "instance_id": "inst-2",
+                        "quote": quote_b64,
+                        "tdx_verification": {"result": {"status": "UpToDate"}},
+                        "certificate": "cert",
+                    }
+                ]
+            },
+        )
+    )
+
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": model, "nonce": nonce, "signing_algo": "ecdsa", "verify_mode": "passthrough"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["verify_mode"] == "passthrough"
     expected_hash = hashlib.sha256(
         json.dumps(data["upstream"]["attestation"], sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     assert data["upstream"]["attestation_sha256"] == expected_hash
     assert data["binding_proof"]["payload"]["upstream_attestation_sha256"] == expected_hash
-    assert data["binding_proof"]["payload"]["model"] == model
+
+
+def test_attestation_chain_proxy_mode_verification_failure_returns_502():
+    model = "moonshotai/Kimi-K2.5-TEE"
+    nonce = "a" * 16
+
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"), patch(
+        "app.api.v1.openai._fetch_chutes_attestation",
+        return_value=(
+            {
+                "attestation_type": "chutes",
+                "nonce": nonce,
+                "chute_id": "chute-123",
+                "all_attestations": [
+                    {
+                        "instance_id": "inst-1",
+                        "e2e_pubkey": "pk-1",
+                        "intel_quote": "bad-quote",
+                        "tdx_verification": {"result": {"status": "OutOfDate"}},
+                    }
+                ],
+            },
+            None,
+        ),
+    ):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": model, "nonce": nonce, "signing_algo": "ecdsa"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "chutes_verification_failed"
 
 
 def test_attestation_chain_nonce_too_short():
@@ -399,6 +495,18 @@ def test_attestation_chain_nonce_too_short():
 
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_nonce"
+
+
+def test_attestation_chain_invalid_verify_mode():
+    with patch("app.api.v1.openai.CHUTES_ENABLED", True), patch("app.api.v1.openai.CHUTES_API_KEY", "test-key"):
+        response = client.get(
+            "/v1/attestation/chain",
+            params={"model": "moonshotai/Kimi-K2.5-TEE", "nonce": "a" * 16, "signing_algo": "ecdsa", "verify_mode": "bad"},
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_verify_mode"
 
 
 def test_attestation_chain_model_empty():

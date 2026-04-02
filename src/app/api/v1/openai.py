@@ -1,9 +1,9 @@
+import base64
 import json
 import os
 import time
-import hashlib
 from hashlib import sha256
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Header, Query
@@ -368,6 +368,8 @@ async def _fetch_chutes_attestation(client: httpx.AsyncClient, model: str, nonce
                 "e2e_pubkey": e2e_pubkey,
                 "intel_quote": e.get("quote"),
                 "gpu_evidence": e.get("gpu_evidence", []),
+                "gpu_tokens": e.get("gpu_tokens"),
+                "tdx_verification": e.get("tdx_verification"),
                 "certificate": e.get("certificate"),
             }
         )
@@ -381,6 +383,109 @@ async def _fetch_chutes_attestation(client: httpx.AsyncClient, model: str, nonce
         "chute_id": chute_id,
         "all_attestations": all_attestations,
     }, None
+
+
+def _decode_quote(quote_b64: str) -> bytes:
+    return base64.b64decode(quote_b64)
+
+
+def _extract_td_attributes(quote_bytes: bytes) -> int:
+    body = quote_bytes[48 : 48 + 584]
+    td_attributes_hex = body[120:128].hex()
+    return int(td_attributes_hex, 16)
+
+
+def _extract_report_data_sha256(quote_bytes: bytes) -> str:
+    td_report_bytes = quote_bytes[48:632]
+    report_data_hex = td_report_bytes[520:584].hex().lower()
+    return report_data_hex[:64]
+
+
+def _decode_jwt_payload_without_verification(token: str) -> dict[str, Any]:
+    parts = token.split(".")
+    if len(parts) < 2:
+        raise ValueError("invalid_jwt_format")
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+    return json.loads(decoded)
+
+
+def _extract_gpu_tokens(attestation: dict[str, Any]) -> Any:
+    if "gpu_tokens" in attestation:
+        return attestation.get("gpu_tokens")
+    return attestation.get("gpu_evidence")
+
+
+def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -> list[str]:
+    errors: list[str] = []
+
+    quote_b64 = attestation.get("intel_quote") or attestation.get("quote")
+    e2e_pubkey = attestation.get("e2e_pubkey")
+    if not quote_b64:
+        return ["missing_intel_quote"]
+    if not e2e_pubkey:
+        return ["missing_e2e_pubkey"]
+
+    try:
+        quote_bytes = _decode_quote(quote_b64)
+    except Exception:
+        return ["invalid_quote_base64"]
+
+    tdx_result = (attestation.get("tdx_verification") or {}).get("result") or {}
+    tdx_status = tdx_result.get("status")
+    if tdx_status != "UpToDate":
+        errors.append(f"tdx_status_not_uptodate:{tdx_status or 'missing'}")
+
+    try:
+        td_attributes = _extract_td_attributes(quote_bytes)
+        if td_attributes & 1:
+            errors.append("tdx_debug_mode_enabled")
+    except Exception:
+        errors.append("tdx_attributes_parse_failed")
+
+    expected_report_data = sha256((nonce + e2e_pubkey).encode("utf-8")).hexdigest().lower()
+    actual_report_data = _extract_report_data_sha256(quote_bytes)
+    if actual_report_data != expected_report_data:
+        errors.append("report_data_binding_mismatch")
+
+    gpu_tokens = _extract_gpu_tokens(attestation)
+    if isinstance(gpu_tokens, dict):
+        if gpu_tokens.get("error"):
+            errors.append("gpu_tokens_error")
+        tokens = gpu_tokens.get("tokens")
+        if tokens:
+            try:
+                platform_entry = tokens[0]
+                if not isinstance(platform_entry, list) or len(platform_entry) < 2:
+                    errors.append("gpu_platform_token_format_invalid")
+                else:
+                    platform_claims = _decode_jwt_payload_without_verification(platform_entry[1])
+                    if platform_claims.get("x-nvidia-overall-att-result") is not True:
+                        errors.append("gpu_overall_attestation_failed")
+                    if platform_claims.get("eat_nonce") != expected_report_data:
+                        errors.append("gpu_eat_nonce_mismatch")
+            except Exception:
+                errors.append("gpu_tokens_parse_failed")
+
+    return errors
+
+
+def _verify_chutes_attestation_bundle(attestation_bundle: dict[str, Any], nonce: str) -> tuple[bool, list[dict[str, Any]]]:
+    details: list[dict[str, Any]] = []
+    attestations = attestation_bundle.get("all_attestations") or []
+    if not attestations:
+        return False, [{"instance_id": None, "errors": ["missing_all_attestations"]}]
+
+    all_ok = True
+    for att in attestations:
+        instance_id = att.get("instance_id")
+        att_errors = _verify_single_chutes_attestation(att, nonce)
+        if att_errors:
+            all_ok = False
+        details.append({"instance_id": instance_id, "errors": att_errors})
+
+    return all_ok, details
 
 
 # Get attestation report of intel quote and nvidia payload
@@ -408,6 +513,7 @@ async def attestation_chain(
     model: str = Query(...),
     nonce: str = Query(...),
     signing_algo: str | None = None,
+    verify_mode: str = Query("proxy"),
 ):
     if not CHUTES_ENABLED:
         return error(status_code=503, message="Chutes route is disabled", type="chutes_disabled")
@@ -422,6 +528,10 @@ async def attestation_chain(
 
     nonce = nonce.strip()
     model = model.strip()
+    mode = verify_mode.strip().lower()
+    if mode not in {"proxy", "passthrough"}:
+        return error(status_code=400, message="verify_mode must be one of: proxy, passthrough", type="invalid_verify_mode")
+
     if len(nonce) < 16:
         return error(
             status_code=400,
@@ -449,7 +559,9 @@ async def attestation_chain(
         return upstream_error
 
     upstream_raw = json.dumps(upstream_attestation, sort_keys=True, separators=(",", ":"))
-    upstream_attestation_sha256 = hashlib.sha256(upstream_raw.encode("utf-8")).hexdigest()
+    upstream_attestation_sha256 = sha256(upstream_raw.encode("utf-8")).hexdigest()
+
+    context = ecdsa_context if algo == ECDSA else ed25519_context
 
     binding_payload = {
         "nonce": nonce,
@@ -460,24 +572,66 @@ async def attestation_chain(
         "upstream_attestation_sha256": upstream_attestation_sha256,
     }
     binding_text = json.dumps(binding_payload, sort_keys=True, separators=(",", ":"))
-    context = ecdsa_context if algo == ECDSA else ed25519_context
+    binding_proof = {
+        "payload": binding_payload,
+        "signature": sign_message(context, binding_text),
+        "signing_algo": algo,
+        "signing_address": context.signing_address,
+    }
+
+    if mode == "passthrough":
+        return {
+            "version": "1",
+            "verify_mode": mode,
+            "proxy": {
+                "attestation": proxy_attestation,
+                "signing_public_key": proxy_attestation.get("signing_public_key"),
+            },
+            "upstream": {
+                "provider": "chutes",
+                "base_url": CHUTES_ATTESTATION_BASE_URL,
+                "model": model,
+                "attestation": upstream_attestation,
+                "attestation_sha256": upstream_attestation_sha256,
+            },
+            "binding_proof": binding_proof,
+        }
+
+    verified, verification_details = _verify_chutes_attestation_bundle(upstream_attestation, nonce)
+    if not verified:
+        return error(
+            status_code=502,
+            message=f"Chutes attestation verification failed in proxy mode: {json.dumps(verification_details, separators=(',', ':'))}",
+            type="chutes_verification_failed",
+        )
+
+    receipt_payload = {
+        "nonce": nonce,
+        "request_hash": sha256(f"{model}:{nonce}".encode("utf-8")).hexdigest(),
+        "provider": "chutes",
+        "model": model,
+        "verify_mode": mode,
+        "verification_policy": "chutes-v1",
+        "verification_policy_version": "1",
+        "upstream_attestation_sha256": upstream_attestation_sha256,
+        "binding_signature": binding_proof["signature"],
+        "binding_signing_algo": binding_proof["signing_algo"],
+        "binding_signing_address": binding_proof["signing_address"],
+        "verified_at": int(time.time()),
+        "result": "pass",
+    }
+    receipt_text = json.dumps(receipt_payload, sort_keys=True, separators=(",", ":"))
 
     return {
         "version": "1",
+        "verify_mode": mode,
         "proxy": {
             "attestation": proxy_attestation,
             "signing_public_key": proxy_attestation.get("signing_public_key"),
         },
-        "upstream": {
-            "provider": "chutes",
-            "base_url": CHUTES_ATTESTATION_BASE_URL,
-            "model": model,
-            "attestation": upstream_attestation,
-            "attestation_sha256": upstream_attestation_sha256,
-        },
-        "binding_proof": {
-            "payload": binding_payload,
-            "signature": sign_message(context, binding_text),
+        "verification_receipt": {
+            "payload": receipt_payload,
+            "signature": sign_message(context, receipt_text),
             "signing_algo": algo,
             "signing_address": context.signing_address,
         },

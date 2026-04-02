@@ -15,6 +15,7 @@ SIGNING_ALGO = os.environ.get("SIGNING_ALGO", "ecdsa").lower()
 CONNECT_TIMEOUT = int(os.environ.get("CONNECT_TIMEOUT", "15"))
 READ_TIMEOUT = int(os.environ.get("READ_TIMEOUT", "300"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
+VERIFY_MODE = os.environ.get("VERIFY_MODE", "proxy").lower()
 
 
 def _canonical_json(obj) -> str:
@@ -66,7 +67,7 @@ def main():
         try:
             resp = requests.get(
                 url,
-                params={"model": MODEL_NAME, "nonce": nonce, "signing_algo": SIGNING_ALGO},
+                params={"model": MODEL_NAME, "nonce": nonce, "signing_algo": SIGNING_ALGO, "verify_mode": VERIFY_MODE},
                 headers={"Authorization": f"Bearer {API_KEY}"},
                 timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
             )
@@ -102,48 +103,54 @@ def main():
 
     # Top-level structure checks
     assert data.get("version") == "1", "unexpected chain version"
-    assert "proxy" in data and "upstream" in data and "binding_proof" in data, "missing chain sections"
+    assert data.get("verify_mode") == VERIFY_MODE, f"unexpected verify_mode: {data.get('verify_mode')}"
+    assert "proxy" in data, "missing proxy section"
 
-    # Proxy section
     proxy = data["proxy"]
     proxy_att = proxy["attestation"]
     assert proxy.get("signing_public_key"), "missing proxy.signing_public_key"
     assert proxy_att.get("signing_public_key") == proxy["signing_public_key"], "proxy signing_public_key mismatch"
 
-    # Upstream hash consistency
-    upstream = data["upstream"]
-    upstream_att = upstream["attestation"]
-    upstream_hash = hashlib.sha256(_canonical_json(upstream_att).encode("utf-8")).hexdigest()
-    assert upstream.get("attestation_sha256") == upstream_hash, "upstream attestation hash mismatch"
+    if VERIFY_MODE == "passthrough":
+        assert "upstream" in data and "binding_proof" in data, "missing passthrough sections"
+        upstream = data["upstream"]
+        upstream_att = upstream["attestation"]
+        upstream_hash = hashlib.sha256(_canonical_json(upstream_att).encode("utf-8")).hexdigest()
+        assert upstream.get("attestation_sha256") == upstream_hash, "upstream attestation hash mismatch"
 
-    # Binding payload consistency
-    bp = data["binding_proof"]
-    payload = bp["payload"]
-    assert payload.get("nonce") == nonce, "binding payload nonce mismatch"
-    assert payload.get("model") == MODEL_NAME, "binding payload model mismatch"
-    assert payload.get("upstream_attestation_sha256") == upstream_hash, "binding payload hash mismatch"
-    assert bp.get("signing_algo") == SIGNING_ALGO, "binding signing_algo mismatch"
-    assert bp.get("signature"), "binding signature missing"
+        bp = data["binding_proof"]
+        payload = bp["payload"]
+        assert payload.get("nonce") == nonce, "binding payload nonce mismatch"
+        assert payload.get("model") == MODEL_NAME, "binding payload model mismatch"
+        assert payload.get("upstream_attestation_sha256") == upstream_hash, "binding payload hash mismatch"
+        assert bp.get("signing_algo") == SIGNING_ALGO, "binding signing_algo mismatch"
+        assert bp.get("signature"), "binding signature missing"
 
-    # Signature verification: proves the binding payload was signed by proxy signing identity.
-    recovered_signer = _verify_binding_signature(bp)
-    proxy_signing_address = proxy_att.get("signing_address")
-    if proxy_signing_address:
-        assert recovered_signer.lower() == proxy_signing_address.lower(), (
-            f"proxy signing address mismatch: recovered={recovered_signer}, proxy={proxy_signing_address}"
-        )
+        recovered_signer = _verify_binding_signature(bp)
+        proxy_signing_address = proxy_att.get("signing_address")
+        if proxy_signing_address:
+            assert recovered_signer.lower() == proxy_signing_address.lower(), (
+                f"proxy signing address mismatch: recovered={recovered_signer}, proxy={proxy_signing_address}"
+            )
 
-    # Optional sanity: if upstream carries nonce, it should match
-    upstream_nonce = upstream_att.get("request_nonce") or upstream_att.get("nonce")
-    if upstream_nonce is not None:
-        assert upstream_nonce == nonce, "upstream nonce does not match request nonce"
+        print("[OK] /v1/attestation/chain passthrough validated")
+        print("binding_signer:", recovered_signer)
+        print("upstream_attestation_sha256:", upstream_hash)
+    else:
+        assert "verification_receipt" in data, "missing verification_receipt"
+        receipt = data["verification_receipt"]
+        assert receipt.get("signature"), "receipt signature missing"
+        payload = receipt.get("payload") or {}
+        assert payload.get("result") == "pass", "receipt result is not pass"
+        assert payload.get("model") == MODEL_NAME, "receipt model mismatch"
+        assert payload.get("nonce") == nonce, "receipt nonce mismatch"
 
-    print("[OK] /v1/attestation/chain validated")
+        print("[OK] /v1/attestation/chain proxy mode validated")
+
     print("nonce:", nonce)
     print("model:", MODEL_NAME)
     print("signing_algo:", SIGNING_ALGO)
-    print("binding_signer:", recovered_signer)
-    print("upstream_attestation_sha256:", upstream_hash)
+    print("verify_mode:", VERIFY_MODE)
 
 
 if __name__ == "__main__":
