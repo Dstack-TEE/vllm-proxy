@@ -63,7 +63,7 @@ CHUTES_CHUTE_ID_CACHE: dict[str, tuple[str, float]] = {}
 CHUTES_CHUTE_ID_CACHE_TTL_SECONDS = int(os.getenv("CHUTES_CHUTE_ID_CACHE_TTL_SECONDS", "3600"))
 
 # Shared executor for online TDX verification to avoid per-attestation thread creation.
-TDX_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("TDX_ONLINE_WORKERS", "4")))
+TDX_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("TDX_ONLINE_WORKERS", "8")))
 
 TIMEOUT = 60 * 10
 
