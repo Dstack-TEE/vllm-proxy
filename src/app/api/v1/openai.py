@@ -62,6 +62,9 @@ CHUTES_API_KEY = os.getenv("CHUTES_API_KEY")
 CHUTES_CHUTE_ID_CACHE: dict[str, tuple[str, float]] = {}
 CHUTES_CHUTE_ID_CACHE_TTL_SECONDS = int(os.getenv("CHUTES_CHUTE_ID_CACHE_TTL_SECONDS", "3600"))
 
+# Shared executor for online TDX verification to avoid per-attestation thread creation.
+TDX_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("TDX_ONLINE_WORKERS", "4")))
+
 TIMEOUT = 60 * 10
 
 COMMON_HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -314,7 +317,11 @@ async def _resolve_chute_id(client: httpx.AsyncClient, model: str) -> str | dict
     if resp.status_code == 429:
         return _error_from_upstream_429(resp)
     if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return error(
+            status_code=502,
+            message=f"Failed to lookup chute by name: {resp.status_code} {resp.text}",
+            type="upstream_http_error",
+        )
 
     data = resp.json()
     items = data.get("items") or []
@@ -339,7 +346,11 @@ async def _fetch_chutes_attestation(client: httpx.AsyncClient, model: str, nonce
     if e2e_resp.status_code == 429:
         return None, _error_from_upstream_429(e2e_resp)
     if e2e_resp.status_code != 200:
-        raise HTTPException(status_code=e2e_resp.status_code, detail=e2e_resp.text)
+        return None, error(
+            status_code=502,
+            message=f"Failed to fetch E2E public keys: {e2e_resp.status_code} {e2e_resp.text}",
+            type="upstream_http_error",
+        )
 
     e2e_data = e2e_resp.json()
     instances = e2e_data.get("instances") or []
@@ -352,7 +363,11 @@ async def _fetch_chutes_attestation(client: httpx.AsyncClient, model: str, nonce
     if evidence_resp.status_code == 429:
         return None, _error_from_upstream_429(evidence_resp)
     if evidence_resp.status_code != 200:
-        raise HTTPException(status_code=evidence_resp.status_code, detail=evidence_resp.text)
+        return None, error(
+            status_code=502,
+            message=f"Failed to fetch evidence: {evidence_resp.status_code} {evidence_resp.text}",
+            type="upstream_http_error",
+        )
 
     evidence_data = evidence_resp.json()
     evidence_list = evidence_data.get("evidence") or []
@@ -419,13 +434,17 @@ def _extract_gpu_tokens(attestation: dict[str, Any]) -> Any:
     return attestation.get("gpu_evidence")
 
 
-def _verify_tdx_online(quote_b64: str) -> dict[str, Any]:
+def _verify_tdx_online(quote: str | bytes) -> dict[str, Any]:
+    """Run online TDX verification via dcap_qvl in a shared thread pool.
+
+    Accepts either base64-encoded quote (str) or raw bytes.
+    """
     try:
         import dcap_qvl
 
-        quote_bytes = _decode_quote(quote_b64)
+        quote_bytes = _decode_quote(quote) if isinstance(quote, str) else quote
 
-        def run_verification():
+        def run_verification() -> Any:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -433,9 +452,8 @@ def _verify_tdx_online(quote_b64: str) -> dict[str, Any]:
             finally:
                 loop.close()
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(run_verification)
-            verified_report = future.result(timeout=30)
+        future = TDX_EXECUTOR.submit(run_verification)
+        verified_report = future.result(timeout=30)
 
         result = json.loads(verified_report.to_json())
         return {"result": result, "error": None}
@@ -470,7 +488,7 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
         detail["errors"] = ["invalid_quote_base64"]
         return detail
 
-    tdx_verification = _verify_tdx_online(quote_b64)
+    tdx_verification = _verify_tdx_online(quote_bytes)
     tdx_error = tdx_verification.get("error")
     if tdx_error:
         detail["tdx_error_present"] = True
@@ -478,7 +496,8 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
 
     tdx_result = tdx_verification.get("result")
     if not tdx_result:
-        errors.append("tdx_status_missing")
+        if not tdx_error:
+            errors.append("tdx_status_missing")
     else:
         tdx_status = tdx_result.get("status") or "missing"
         detail["tdx_status"] = tdx_status
