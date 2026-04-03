@@ -435,7 +435,7 @@ def _extract_gpu_tokens(attestation: dict[str, Any]) -> Any:
 
 
 def _verify_tdx_online(quote: str | bytes) -> dict[str, Any]:
-    """Run online TDX verification via dcap_qvl in a shared thread pool.
+    """Run online TDX verification via dcap_qvl synchronously.
 
     Accepts either base64-encoded quote (str) or raw bytes.
     """
@@ -444,16 +444,12 @@ def _verify_tdx_online(quote: str | bytes) -> dict[str, Any]:
 
         quote_bytes = _decode_quote(quote) if isinstance(quote, str) else quote
 
-        def run_verification() -> Any:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(dcap_qvl.get_collateral_and_verify(quote_bytes))
-            finally:
-                loop.close()
-
-        future = TDX_EXECUTOR.submit(run_verification)
-        verified_report = future.result(timeout=30)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            verified_report = loop.run_until_complete(dcap_qvl.get_collateral_and_verify(quote_bytes))
+        finally:
+            loop.close()
 
         result = json.loads(verified_report.to_json())
         return {"result": result, "error": None}
@@ -461,7 +457,17 @@ def _verify_tdx_online(quote: str | bytes) -> dict[str, Any]:
         return {"result": None, "error": str(exc)}
 
 
-def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -> dict[str, Any]:
+async def _verify_tdx_online_async(quote: str | bytes) -> dict[str, Any]:
+    """Async wrapper that runs TDX verification in the shared executor.
+
+    This keeps the event loop responsive while using a bounded thread pool
+    for the heavy verification work.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(TDX_EXECUTOR, _verify_tdx_online, quote)
+
+
+async def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -> dict[str, Any]:
     errors: list[str] = []
     detail: dict[str, Any] = {
         "instance_id": attestation.get("instance_id"),
@@ -488,7 +494,7 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
         detail["errors"] = ["invalid_quote_base64"]
         return detail
 
-    tdx_verification = _verify_tdx_online(quote_bytes)
+    tdx_verification = await _verify_tdx_online_async(quote_bytes)
     tdx_error = tdx_verification.get("error")
     if tdx_error:
         detail["tdx_error_present"] = True
@@ -552,19 +558,20 @@ def _verify_single_chutes_attestation(attestation: dict[str, Any], nonce: str) -
     return detail
 
 
-def _verify_chutes_attestation_bundle(attestation_bundle: dict[str, Any], nonce: str) -> tuple[bool, list[dict[str, Any]]]:
+async def _verify_chutes_attestation_bundle(attestation_bundle: dict[str, Any], nonce: str) -> tuple[bool, list[dict[str, Any]]]:
     details: list[dict[str, Any]] = []
     attestations = attestation_bundle.get("all_attestations") or []
     if not attestations:
         return False, [{"instance_id": None, "errors": ["missing_all_attestations"]}]
 
-    all_ok = True
-    for att in attestations:
-        att_detail = _verify_single_chutes_attestation(att, nonce)
-        if att_detail.get("errors"):
-            all_ok = False
-        details.append(att_detail)
+    # Verify all instances concurrently, bounded by TDX_EXECUTOR size.
+    tasks = [
+        _verify_single_chutes_attestation(att, nonce)
+        for att in attestations
+    ]
+    details = await asyncio.gather(*tasks)
 
+    all_ok = all(not d.get("errors") for d in details)
     return all_ok, details
 
 
@@ -677,11 +684,15 @@ async def attestation_chain(
             "binding_proof": binding_proof,
         }
 
-    verified, verification_details = _verify_chutes_attestation_bundle(upstream_attestation, nonce)
+    verified, verification_details = await _verify_chutes_attestation_bundle(upstream_attestation, nonce)
     if not verified:
+        log.error(
+            "Chutes attestation verification failed in proxy mode: %s",
+            json.dumps(verification_details, separators=(",", ":")),
+        )
         return error(
             status_code=502,
-            message=f"Chutes attestation verification failed in proxy mode: {json.dumps(verification_details, separators=(',', ':'))}",
+            message="Chutes attestation verification failed in proxy mode",
             type="chutes_verification_failed",
         )
 
