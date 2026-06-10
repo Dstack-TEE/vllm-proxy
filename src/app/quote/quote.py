@@ -39,14 +39,21 @@ class SigningContext:
         raise ValueError("Signing context is not properly initialised")
 
 
-def _build_report_data(signing_address_bytes: bytes, nonce: bytes) -> bytes:
-    """Build TDX report data: [signing_address (padded to 32 bytes) || nonce (32 bytes)]"""
+def _build_report_data(
+    signing_address_bytes: bytes,
+    nonce: bytes,
+    cert_fingerprint: Optional[bytes] = None,
+) -> bytes:
+    """report_data = identity(32) || nonce(32). identity is the padded signing
+    address (v1), or SHA256(signing address + TLS SPKI fingerprint) (v2)."""
     if not signing_address_bytes:
         raise ValueError("Signing address must be provided")
     if len(signing_address_bytes) > 32:
         raise ValueError("Signing address exceeds 32 bytes")
     if len(nonce) != 32:
         raise ValueError("Nonce must be 32 bytes")
+    if cert_fingerprint is not None:
+        return hashlib.sha256(signing_address_bytes + cert_fingerprint).digest() + nonce
     return signing_address_bytes.ljust(32, b"\x00") + nonce
 
 
@@ -143,13 +150,16 @@ def sign_message(context: SigningContext, content: str) -> str:
 
 
 def generate_attestation(
-    context: SigningContext, nonce: Optional[bytes | str] = None
+    context: SigningContext,
+    nonce: Optional[bytes | str] = None,
+    cert_fingerprint: Optional[bytes] = None,
 ) -> dict:
     request_nonce_bytes = _parse_nonce(nonce)
     request_nonce_hex = request_nonce_bytes.hex()
 
-    # Build TDX report data: signing_address || request_nonce
-    report_data = _build_report_data(context.signing_address_bytes, request_nonce_bytes)
+    report_data = _build_report_data(
+        context.signing_address_bytes, request_nonce_bytes, cert_fingerprint
+    )
 
     client = DstackClient()
     quote_result = client.get_quote(report_data)
@@ -162,7 +172,7 @@ def generate_attestation(
 
     info = client.info().model_dump()
 
-    return dict(
+    attestation = dict(
         signing_address=context.signing_address,
         signing_algo=context.method,
         request_nonce=request_nonce_hex,
@@ -173,6 +183,9 @@ def generate_attestation(
         event_log=quote_result.event_log,
         vm_config=quote_result.vm_config,
     )
+    if cert_fingerprint is not None:
+        attestation["tls_cert_fingerprint"] = cert_fingerprint.hex()
+    return attestation
 
 
 __all__ = [

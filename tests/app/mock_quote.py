@@ -39,11 +39,15 @@ def sign_message(context: SigningContext, content: str) -> str:
     return context.sign(content)
 
 
-def _report_data(identifier: bytes, nonce: bytes) -> bytes:
+def _report_data(identifier: bytes, nonce: bytes, cert_fingerprint=None) -> bytes:
+    if cert_fingerprint is not None:
+        import hashlib
+
+        return hashlib.sha256(identifier + cert_fingerprint).digest() + nonce
     return identifier.ljust(32, b"\x00") + nonce
 
 
-def generate_attestation(context: SigningContext, nonce=None) -> dict:
+def generate_attestation(context: SigningContext, nonce=None, cert_fingerprint=None) -> dict:
     if nonce is None:
         nonce_hex = "aa" * 32
     elif isinstance(nonce, bytes):
@@ -52,7 +56,7 @@ def generate_attestation(context: SigningContext, nonce=None) -> dict:
         nonce_hex = nonce
 
     nonce_bytes = bytes.fromhex(nonce_hex)
-    report_data = _report_data(context.attested_key_bytes, nonce_bytes)
+    report_data = _report_data(context.attested_key_bytes, nonce_bytes, cert_fingerprint)
 
     payload = json.dumps({"nonce": nonce_hex, "evidence_list": [{"mock": "evidence"}], "arch": GPU_ARCH})
     info = {
@@ -64,7 +68,7 @@ def generate_attestation(context: SigningContext, nonce=None) -> dict:
     }
     quote = "mock_intel_quote"
 
-    return dict(
+    attestation = dict(
         signing_address=context.signing_address,
         signing_algo=context.method,
         request_nonce=nonce_hex,
@@ -75,6 +79,9 @@ def generate_attestation(context: SigningContext, nonce=None) -> dict:
         event_log=json.dumps({"mock": True}),
         vm_config="",
     )
+    if cert_fingerprint is not None:
+        attestation["tls_cert_fingerprint"] = cert_fingerprint.hex()
+    return attestation
 
 
 def build_payload(nonce, evidences, cert_chain=None):  # compatibility helper

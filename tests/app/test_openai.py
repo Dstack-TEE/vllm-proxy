@@ -269,6 +269,57 @@ async def test_signature_chat_not_found():
 
 
 @pytest.mark.asyncio
+async def test_attestation_report_v1_default():
+    """Default (version=1) attestation has no TLS fingerprint binding."""
+    response = client.get(
+        "/v1/attestation/report", headers={"Authorization": TEST_AUTH_HEADER}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("version", 1) == 1
+    assert "tls_cert_fingerprint" not in data
+    assert "tls_cert_fingerprint" not in data["all_attestations"][0]
+
+
+@pytest.mark.asyncio
+async def test_attestation_report_v2_binds_tls_fingerprint():
+    """version=2 surfaces the custom-domain SPKI fingerprint (hex) and echoes version."""
+    fingerprint = b"\xab" * 32
+    with patch(
+        "app.api.v1.openai.resolve_spki_fingerprint", return_value=fingerprint
+    ):
+        response = client.get(
+            "/v1/attestation/report?version=2",
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["version"] == 2
+    assert data["tls_cert_fingerprint"] == fingerprint.hex()
+    assert data["all_attestations"][0]["tls_cert_fingerprint"] == fingerprint.hex()
+
+
+@pytest.mark.asyncio
+async def test_attestation_report_v2_without_cert_returns_400():
+    """version=2 must fail closed when no TLS certificate is available."""
+    with patch("app.api.v1.openai.resolve_spki_fingerprint", return_value=None):
+        response = client.get(
+            "/v1/attestation/report?version=2",
+            headers={"Authorization": TEST_AUTH_HEADER},
+        )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_attestation_report_unknown_version_returns_400():
+    response = client.get(
+        "/v1/attestation/report?version=3",
+        headers={"Authorization": TEST_AUTH_HEADER},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
 @pytest.mark.respx
 async def test_chat_completions_with_request_hash_streaming(respx_mock):
     # Test request data
