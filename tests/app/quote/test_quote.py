@@ -33,12 +33,18 @@ class TestQuote(unittest.TestCase):
             nvmlDeviceGetCount=lambda: 1,
         )
 
+        self.captured = {}
+
+        def _get_quote(report_data):
+            self.captured["report_data"] = report_data
+            return types.SimpleNamespace(
+                quote="mock_quote",
+                event_log=json.dumps({"mock": True}),
+                vm_config="mock_vm_config",
+            )
+
         client = types.SimpleNamespace()
-        client.get_quote = lambda report_data: types.SimpleNamespace(
-            quote="mock_quote",
-            event_log=json.dumps({"mock": True}),
-            vm_config="mock_vm_config",
-        )
+        client.get_quote = _get_quote
         client.info = lambda: types.SimpleNamespace(
             model_dump=lambda: {
                 "compose_hash": "db669af634b75c7f298400f3b6c2aa8ba54998bac83e23d10ab4eaadc4b50ccf",
@@ -47,12 +53,36 @@ class TestQuote(unittest.TestCase):
         )
         dstack_mod = types.SimpleNamespace(DstackClient=lambda: client)
 
+        # Stub the eth_* stack so loading quote.py stays hermetic (it imports
+        # eth_utils / web3 / eth_account at module scope and builds an ECDSA
+        # context on import).
+        mock_account = types.SimpleNamespace(
+            address="0x" + "11" * 20,
+            sign_message=lambda msg: types.SimpleNamespace(signature=b"\x00" * 65),
+        )
+        web3_mod = types.SimpleNamespace(
+            Account=object,  # referenced in a SigningContext type annotation
+            Web3=lambda: types.SimpleNamespace(
+                eth=types.SimpleNamespace(
+                    account=types.SimpleNamespace(create=lambda: mock_account)
+                )
+            ),
+        )
+        eth_account_messages = types.ModuleType("eth_account.messages")
+        eth_account_messages.encode_defunct = lambda **kwargs: None
+        eth_account_mod = types.ModuleType("eth_account")
+        eth_account_mod.messages = eth_account_messages
+
         self.original_modules = {}
         for name, module in {
             "verifier": types.SimpleNamespace(cc_admin=self.mock_cc_admin),
             "nv_attestation_sdk": types.SimpleNamespace(attestation=attestation_mod),
             "pynvml": pynvml_mod,
             "dstack_sdk": dstack_mod,
+            "eth_utils": types.ModuleType("eth_utils"),
+            "web3": web3_mod,
+            "eth_account": eth_account_mod,
+            "eth_account.messages": eth_account_messages,
         }.items():
             if name in sys.modules:
                 self.original_modules[name] = sys.modules[name]
@@ -82,7 +112,18 @@ class TestQuote(unittest.TestCase):
 
     def tearDown(self):
         sys.modules.update(self.original_modules)
-        for key in ["verifier", "nv_attestation_sdk", "pynvml", "dstack_sdk", "app.quote.quote", "app.quote"]:
+        for key in [
+            "verifier",
+            "nv_attestation_sdk",
+            "pynvml",
+            "dstack_sdk",
+            "eth_utils",
+            "web3",
+            "eth_account",
+            "eth_account.messages",
+            "app.quote.quote",
+            "app.quote",
+        ]:
             sys.modules.pop(key, None)
 
     def test_generate_attestation_binds_nonce(self):
@@ -102,6 +143,39 @@ class TestQuote(unittest.TestCase):
         combined = self.quote._build_report_data(identifier, nonce)
         self.assertEqual(combined[:32], identifier.ljust(32, b"\x00"))
         self.assertEqual(combined[32:], nonce)
+
+    def test_build_report_data_fingerprint_mode(self):
+        import hashlib
+
+        identifier = b"\x01" * 20
+        nonce = b"\x02" * 32
+        fingerprint = b"\xab" * 32
+        combined = self.quote._build_report_data(identifier, nonce, fingerprint)
+        expected_first = hashlib.sha256(identifier + fingerprint).digest()
+        self.assertEqual(combined[:32], expected_first)
+        self.assertEqual(combined[32:], nonce)
+        # The fingerprint layout must differ from the legacy address layout.
+        self.assertNotEqual(combined, self.quote._build_report_data(identifier, nonce))
+
+    def test_generate_attestation_fingerprint_binding(self):
+        request_nonce_hex = "aa" * 32
+        fingerprint = b"\xcd" * 32
+        result = self.quote.generate_attestation(
+            self.quote.ecdsa_context, request_nonce_hex, cert_fingerprint=fingerprint
+        )
+        self.assertEqual(result["tls_cert_fingerprint"], fingerprint.hex())
+        # report_data passed to get_quote uses the SHA256(addr || fp) layout.
+        addr_bytes = self.quote.ecdsa_context.signing_address_bytes
+        import hashlib
+
+        expected_first = hashlib.sha256(addr_bytes + fingerprint).digest()
+        report_data = self.captured["report_data"]
+        self.assertEqual(report_data[:32], expected_first)
+        self.assertEqual(report_data[32:].hex(), request_nonce_hex)
+
+    def test_generate_attestation_without_fingerprint_has_no_field(self):
+        result = self.quote.generate_attestation(self.quote.ed25519_context, "aa" * 32)
+        self.assertNotIn("tls_cert_fingerprint", result)
 
     def test_random_nonce_generation(self):
         result = self.quote.generate_attestation(self.quote.ed25519_context)

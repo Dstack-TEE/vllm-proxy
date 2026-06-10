@@ -40,8 +40,11 @@ from app.quote.quote import (
     generate_attestation,
     sign_message,
 )
+from app.quote.tls_cert import resolve_spki_fingerprint
 
 router = APIRouter(tags=["openai"])
+
+SUPPORTED_ATTESTATION_VERSIONS = (1, 2)  # v2 adds the TLS-SPKI binding to report_data
 
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://vllm:8000")
 VLLM_URL = f"{VLLM_BASE_URL}/v1/chat/completions"
@@ -244,19 +247,38 @@ async def attestation_report(
     signing_algo: str | None = None,
     nonce: str | None = Query(None),
     signing_address: str | None = Query(None),
+    version: int = Query(1),
 ):
     signing_algo = ECDSA if signing_algo is None else signing_algo
     if signing_algo not in [ECDSA, ED25519]:
         return invalid_signing_algo()
 
+    if version not in SUPPORTED_ATTESTATION_VERSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported attestation report version: {version}",
+        )
+
     context = ecdsa_context if signing_algo == ECDSA else ed25519_context
 
+    cert_fingerprint = None
+    if version >= 2:
+        cert_fingerprint = resolve_spki_fingerprint()
+        if not cert_fingerprint:
+            raise HTTPException(
+                status_code=400,
+                detail="attestation version 2 requires a TLS certificate (set TLS_CERT_PATH)",
+            )
+
     try:
-        attestation = dict(generate_attestation(context, nonce))
+        attestation = dict(
+            generate_attestation(context, nonce, cert_fingerprint=cert_fingerprint)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     attestation["signing_public_key"] = local_model_public_key_hex(signing_algo)
+    attestation["version"] = version
     resp = dict(attestation)
     resp["signing_public_key"] = attestation["signing_public_key"]
     resp["all_attestations"] = [attestation]
